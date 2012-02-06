@@ -355,6 +355,32 @@ class RingBuilder(object):
                 balance = dev_balance
         return balance
 
+    def increment_part_power(self):
+        new_replica2part2dev = \
+            [array('H') for _junk in xrange(self.replicas)]
+        for replica in xrange(self.replicas):
+            for part in xrange(self.parts):
+                new_replica2part2dev[replica].append(
+                    self._replica2part2dev[replica][part])
+                new_replica2part2dev[replica].append(
+                    self._replica2part2dev[replica][part])
+        self._replica2part2dev = new_replica2part2dev
+
+        new_last_part_moves = array('B')
+        for move in self._last_part_moves:
+            new_last_part_moves.append(move)
+            new_last_part_moves.append(move)
+        self._last_part_moves = new_last_part_moves
+
+        self.part_power += 1
+        self.parts *= 2
+
+        for dev in self.devs:
+            if dev is not None:
+                dev['parts'] *= 2
+
+        self.version += 1
+
     def pretend_min_part_hours_passed(self):
         """
         Override min_part_hours by marking all partitions as having been moved

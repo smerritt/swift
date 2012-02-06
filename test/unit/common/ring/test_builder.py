@@ -15,6 +15,7 @@
 
 import os
 import unittest
+from array import array
 from shutil import rmtree
 
 from swift.common import exceptions
@@ -125,6 +126,48 @@ class TestRingBuilder(unittest.TestCase):
             for dev_id in part2dev_id:
                 counts[dev_id] = counts.get(dev_id, 0) + 1
         self.assertEquals(counts, {0: 256, 2: 256, 3: 256})
+
+    def test_increment_part_power(self):
+        rb = ring.RingBuilder(8, 3, 1)
+        rb.add_dev({'id': 0, 'zone': 0, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 10000, 'device': 'sda1'})
+        rb.add_dev({'id': 1, 'zone': 1, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 10001, 'device': 'sda1'})
+        rb.add_dev({'id': 2, 'zone': 2, 'weight': 1, 'ip': '127.0.0.1',
+                    'port': 10002, 'device': 'sda1'})
+        rb.rebalance()
+        old_version = rb.version
+
+        wanted_location = {}
+        for part in xrange(rb.parts):
+            wanted_location[2 * part] = {}
+            wanted_location[2 * part + 1] = {}
+            for replica in range(0, rb.replicas):
+                wanted_location[2 * part][replica] = \
+                    rb._replica2part2dev[replica][part]
+                wanted_location[2 * part + 1][replica] = \
+                    rb._replica2part2dev[replica][part]
+
+        wanted_last_part_moves = array('B')
+        for move in rb._last_part_moves:
+            wanted_last_part_moves.append(move)
+            wanted_last_part_moves.append(move)
+
+        rb.increment_part_power()
+        rb.validate()
+        self.assertEquals(9, rb.part_power)
+        self.assertEquals(2**9, rb.parts)
+        self.assertEquals(old_version + 1, rb.version)
+
+        new_location = {}
+        for part in xrange(rb.parts):
+            new_location[part] = {}
+            for replica in range(0, rb.replicas):
+                new_location[part][replica] = \
+                    rb._replica2part2dev[replica][part]
+
+        self.assertEquals(wanted_location, new_location)
+        self.assertEquals(wanted_last_part_moves, rb._last_part_moves)
 
     def test_shuffled_gather(self):
         if self._shuffled_gather_helper() and \

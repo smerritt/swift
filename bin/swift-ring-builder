@@ -198,6 +198,20 @@ swift-ring-builder <builder_file>
                      dev['meta'])
         exit(EXIT_SUCCESS)
 
+    def increment_part_power():
+        """
+swift-ring-builder <builder-file> increment-part-power
+    Adds one to the ring's part_power, doubling the number of partitions.
+        """
+        builder.increment_part_power()
+
+        builder_filename = argv[1]
+        pickle.dump(builder.to_dict(), open(pathjoin(backup_dir,
+            '%d.' % time() + basename(builder_filename)), 'wb'), protocol=2)
+        pickle.dump(builder.to_dict(), open(builder_filename, 'wb'), protocol=2)
+        print 'The part_power of %s is now %d.' % (builder_filename, builder.part_power)
+        exit(EXIT_SUCCESS)
+
     def search():
         """
 swift-ring-builder <builder_file> search <search-value>
