@@ -180,7 +180,7 @@ class SegmentedIterable(object):
             resp = self.controller.GETorHEAD_base(req, _('Object'), partition,
                 self.controller.iter_nodes(partition, nodes,
                 self.controller.app.object_ring), path,
-                self.controller.app.object_ring.replica_count)
+                len(nodes))
             if resp.status_int // 100 != 2:
                 raise Exception(_('Could not load object segment %(path)s:' \
                     ' %(status)s') % {'path': path, 'status': resp.status_int})
@@ -408,7 +408,7 @@ class Controller(object):
                 return None, None, None
         result_code = 0
         container_count = 0
-        attempts_left = self.app.account_ring.replica_count
+        attempts_left = len(nodes)
         path = '/%s' % account
         headers = {'x-trans-id': self.trans_id, 'Connection': 'close'}
         for node in self.iter_nodes(partition, nodes, self.app.account_ring):
@@ -501,7 +501,7 @@ class Controller(object):
         sync_key = None
         container_size = None
         versions = None
-        attempts_left = self.app.container_ring.replica_count
+        attempts_left = len(nodes)
         headers = {'x-trans-id': self.trans_id, 'Connection': 'close'}
         for node in self.iter_nodes(partition, nodes, self.app.container_ring):
             try:
@@ -599,13 +599,14 @@ class Controller(object):
                         backend request that should be made.
         :returns: a webob Response object
         """
-        nodes = self.iter_nodes(part, ring.get_part_nodes(part), ring)
-        pile = GreenPile(ring.replica_count)
+        start_nodes = ring.get_part_nodes(part)
+        nodes = self.iter_nodes(part, start_nodes, ring)
+        pile = GreenPile(len(start_nodes))
         for head in headers:
             pile.spawn(self._make_request, nodes, part, method, path,
                     head, query_string)
         response = [resp for resp in pile if resp]
-        while len(response) < ring.replica_count:
+        while len(response) < len(start_nodes):
             response.append((503, '', ''))
         statuses, reasons, bodies = zip(*response)
         return self.best_response(req, statuses, reasons, bodies,
@@ -877,7 +878,7 @@ class ObjectController(Controller):
             shuffle(lnodes)
             lresp = self.GETorHEAD_base(lreq, _('Container'),
                 lpartition, lnodes, lreq.path_info,
-                self.app.container_ring.replica_count)
+                len(lnodes))
             if 'swift.authorize' in env:
                 lreq.acl = lresp.headers.get('x-container-read')
                 aresp = env['swift.authorize'](lreq)
@@ -909,7 +910,7 @@ class ObjectController(Controller):
         shuffle(nodes)
         resp = self.GETorHEAD_base(req, _('Object'), partition,
                 self.iter_nodes(partition, nodes, self.app.object_ring),
-                req.path_info, self.app.object_ring.replica_count)
+                req.path_info, len(nodes))
 
         # If we get a 416 Requested Range Not Satisfiable we have to check if
         # we were actually requesting a manifest and then redo
@@ -919,7 +920,7 @@ class ObjectController(Controller):
             req.range = None
             resp2 = self.GETorHEAD_base(req, _('Object'), partition,
                     self.iter_nodes(partition, nodes, self.app.object_ring),
-                    req.path_info, self.app.object_ring.replica_count)
+                    req.path_info, len(nodes))
             if 'x-object-manifest' not in resp2.headers:
                 return resp
             resp = resp2
@@ -1154,7 +1155,7 @@ class ObjectController(Controller):
             hreq = Request.blank(req.path_info, headers={'X-Newest': 'True'},
                                  environ={'REQUEST_METHOD': 'HEAD'})
             hresp = self.GETorHEAD_base(hreq, _('Object'), partition, nodes,
-                hreq.path_info, self.app.object_ring.replica_count)
+                hreq.path_info, len(nodes))
         # Used by container sync feature
         if 'x-timestamp' in req.headers:
             try:
@@ -1535,7 +1536,7 @@ class ContainerController(Controller):
                         self.account_name, self.container_name)
         shuffle(nodes)
         resp = self.GETorHEAD_base(req, _('Container'), part, nodes,
-                req.path_info, self.app.container_ring.replica_count)
+                req.path_info, len(nodes))
 
         if self.app.memcache:
             # set the memcache container size for ratelimiting
@@ -1684,7 +1685,7 @@ class AccountController(Controller):
         partition, nodes = self.app.account_ring.get_nodes(self.account_name)
         shuffle(nodes)
         resp = self.GETorHEAD_base(req, _('Account'), partition, nodes,
-                req.path_info.rstrip('/'), self.app.account_ring.replica_count)
+                req.path_info.rstrip('/'), len(nodes))
         if resp.status_int == 404 and self.app.account_autocreate:
             if len(self.account_name) > MAX_ACCOUNT_NAME_LENGTH:
                 resp = HTTPBadRequest(request=req)
@@ -1702,7 +1703,7 @@ class AccountController(Controller):
                 raise Exception('Could not autocreate account %r' %
                                 self.account_name)
             resp = self.GETorHEAD_base(req, _('Account'), partition, nodes,
-                req.path_info.rstrip('/'), self.app.account_ring.replica_count)
+                req.path_info.rstrip('/'), len(nodes))
         return resp
 
     @public
