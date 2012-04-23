@@ -13,6 +13,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import bisect
+import itertools
+import math
+
 from array import array
 from collections import defaultdict
 from random import randint, shuffle
@@ -20,6 +24,7 @@ from time import time
 
 from swift.common import exceptions
 from swift.common.ring import RingData
+from swift.common.ring.utils import tiers_for_dev, build_tier_tree
 
 
 class RingBuilder(object):
@@ -294,21 +299,27 @@ class RingBuilder(object):
                  self.parts * self.replicas))
         if stats:
             dev_usage = array('I', (0 for _junk in xrange(len(self.devs))))
-        for part in xrange(self.parts):
-            zones = {}
-            for replica in xrange(self.replicas):
-                dev_id = self._replica2part2dev[replica][part]
-                if stats:
+            for part2dev in self._replica2part2dev:
+                for dev_id in part2dev:
                     dev_usage[dev_id] += 1
-                zone = self.devs[dev_id]['zone']
-                if zone in zones:
+
+        max_allowed_replicas = self._build_max_replicas_by_tier()
+
+        for part in xrange(self.parts):
+            replicas_at_tier = defaultdict(lambda: 0)
+            for replica in xrange(self.replicas):
+                dev = self.devs[self._replica2part2dev[replica][part]]
+                for tier in tiers_for_dev(dev):
+                    replicas_at_tier[tier] += 1
+
+            for tier in replicas_at_tier:
+                if replicas_at_tier[tier] > max_allowed_replicas[tier]:
                     raise exceptions.RingValidationError(
-                        'Partition %d not in %d distinct zones. ' \
-                        'Zones were: %s' %
-                        (part, self.replicas,
-                         [self.devs[self._replica2part2dev[r][part]]['zone']
-                          for r in xrange(self.replicas)]))
-                zones[zone] = True
+                        "Partition %d was in tier %r more than %d times; "
+                        "it appeared %d times" %
+                        (part, tier, max_allowed_replicas[tier],
+                         replicas_at_tier[tier]))
+
         if stats:
             weighted_parts = self.weighted_parts()
             worst = 0
@@ -417,10 +428,12 @@ class RingBuilder(object):
 
     def _gather_reassign_parts(self):
         """
-        Returns a list of (partition, replicas) pairs to be reassigned
-        by gathering them from removed devices and overweight devices.
+        Returns a list of (partition, replicas) pairs to be reassigned by
+        gathering from removed devices, insufficiently-far-apart replicas, and
+        overweight drives.
         """
         reassign_parts = defaultdict(list)
+        spread_out_parts = defaultdict(list)
         removed_dev_parts = defaultdict(list)
         if self._remove_devs:
             dev_ids = [d['id'] for d in self._remove_devs if d['parts']]
@@ -432,23 +445,41 @@ class RingBuilder(object):
                             self._last_part_moves[part] = 0
                             removed_dev_parts[part].append(replica)
 
+        max_allowed_replicas = self._build_max_replicas_by_tier()
+        for part in xrange(self.parts):
+            replicas_at_tier = defaultdict(lambda: 0)
+            for replica in xrange(self.replicas):
+                dev = self.devs[self._replica2part2dev[replica][part]]
+                for tier in tiers_for_dev(dev):
+                    replicas_at_tier[tier] += 1
+            for replica in xrange(self.replicas):
+                dev = self.devs[self._replica2part2dev[replica][part]]
+                for tier in tiers_for_dev(dev):
+                    if replicas_at_tier[tier] > max_allowed_replicas[tier]:
+                        self._last_part_moves[part] = 0
+                        spread_out_parts[part].append(replica)
+                        dev['parts_wanted'] += 1
+                        dev['parts'] -= 1
+                        break
+
         start = self._last_part_gather_start / 4 + randint(0, self.parts / 2)
         self._last_part_gather_start = start
         for replica in xrange(self.replicas):
             part2dev = self._replica2part2dev[replica]
-            for half in (xrange(start, self.parts), xrange(0, start)):
-                for part in half:
-                    if self._last_part_moves[part] < self.min_part_hours:
-                        continue
-                    if part in removed_dev_parts:
-                        continue
-                    dev = self.devs[part2dev[part]]
-                    if dev['parts_wanted'] < 0:
-                        self._last_part_moves[part] = 0
-                        dev['parts_wanted'] += 1
-                        dev['parts'] -= 1
-                        reassign_parts[part].append(replica)
+            for part in itertools.chain(xrange(start, self.parts),
+                                        xrange(0, start)):
+                if self._last_part_moves[part] < self.min_part_hours:
+                    continue
+                if part in removed_dev_parts:
+                    continue
+                dev = self.devs[part2dev[part]]
+                if dev['parts_wanted'] < 0:
+                    self._last_part_moves[part] = 0
+                    dev['parts_wanted'] += 1
+                    dev['parts'] -= 1
+                    reassign_parts[part].append(replica)
 
+        reassign_parts.update(spread_out_parts)
         reassign_parts.update(removed_dev_parts)
 
         reassign_parts_list = list(reassign_parts.iteritems())
@@ -461,7 +492,14 @@ class RingBuilder(object):
         the initial assignment. The devices are ordered by how many partitions
         they still want and kept in that order throughout the process. The
         gathered partitions are iterated through, assigning them to devices
-        according to the "most wanted" and distinct zone restrictions.
+        according to the "most wanted" while keeping the replicas as "far
+        apart" as possible. Two different zones are considered the
+        farthest-apart things, followed by different ip/port pairs within a
+        zone; the least-far-apart things are different devices with the same
+        ip/port pair in the same zone.
+
+        If you want more replicas than devices, you won't get all your
+        replicas.
         """
         for dev in self._iter_devs():
             dev['sort_key'] = self._sort_key_for(dev)
@@ -469,27 +507,76 @@ class RingBuilder(object):
             sorted((d for d in self._iter_devs() if d['weight']),
                    key=lambda x: x['sort_key'])
 
-        for part, replace_replicas in reassign_parts:
-            other_zones = array('H')
-            replace = []
-            for replica in xrange(self.replicas):
-                if replica in replace_replicas:
-                    replace.append(replica)
-                else:
-                    other_zones.append(self.devs[
-                        self._replica2part2dev[replica][part]]['zone'])
+        tier2children = build_tier_tree(available_devs)
 
-            for replica in replace:
-                index = len(available_devs) - 1
-                while available_devs[index]['zone'] in other_zones:
-                    index -= 1
-                dev = available_devs.pop(index)
-                other_zones.append(dev['zone'])
-                self._replica2part2dev[replica][part] = dev['id']
+        tier2devs = defaultdict(list)
+        tier2sort_key = defaultdict(list)
+        tiers_by_depth = defaultdict(set)
+        for dev in available_devs:
+            for tier in tiers_for_dev(dev):
+                tier2devs[tier].append(dev)  # <-- starts out sorted!
+                tier2sort_key[tier].append(dev['sort_key'])
+                tiers_by_depth[len(tier)].add(tier)
+
+        for part, replace_replicas in reassign_parts:
+            other_replicas = defaultdict(lambda: 0)
+            for replica in xrange(self.replicas):
+                if replica not in replace_replicas:
+                    dev = self.devs[self._replica2part2dev[replica][part]]
+                    for tier in tiers_for_dev(dev):
+                        other_replicas[tier] += 1
+
+            def find_home_for_replica(replica, tier=(), depth=1):
+                # Order the tiers by how many replicas of this
+                # partition they already have. Then, of the ones
+                # with the smallest number of replicas, pick the
+                # tier with the hungriest drive and then continue
+                # searching in that subtree.
+                #
+                # There are other strategies we could use here,
+                # such as hungriest-tier (i.e. biggest
+                # sum-of-parts-wanted) or picking one at random.
+                # However, hungriest-drive is what was used here
+                # before, and it worked pretty well in practice.
+                #
+                # Note that this allocator will balance things as
+                # evenly as possible at each level of the device
+                # layout. If your layout is extremely unbalanced,
+                # this may produce poor results.
+                candidate_tiers = tier2children[tier]
+                min_count = min(other_replicas[t] for t in candidate_tiers)
+                candidate_tiers = [t for t in candidate_tiers
+                                   if other_replicas[t] == min_count]
+                candidate_tiers.sort(
+                    key=lambda t: tier2devs[t][-1]['parts_wanted'])
+
+                if depth == max(tiers_by_depth.keys()):
+                    return tier2devs[candidate_tiers[-1]][-1]
+
+                return find_home_for_replica(replica,
+                                             tier=candidate_tiers[-1],
+                                             depth=depth + 1)
+
+            for replica in replace_replicas:
+                dev = find_home_for_replica(replica)
                 dev['parts_wanted'] -= 1
                 dev['parts'] += 1
-                dev['sort_key'] = self._sort_key_for(dev)
-                self._insert_dev_sorted(available_devs, dev)
+                old_sort_key = dev['sort_key']
+                new_sort_key = dev['sort_key'] = self._sort_key_for(dev)
+                for tier in tiers_for_dev(dev):
+                    other_replicas[tier] += 1
+
+                    index = bisect.bisect_left(tier2sort_key[tier],
+                                               old_sort_key)
+                    tier2devs[tier].pop(index)
+                    tier2sort_key[tier].pop(index)
+
+                    new_index = bisect.bisect_left(tier2sort_key[tier],
+                                                   new_sort_key)
+                    tier2devs[tier].insert(new_index, dev)
+                    tier2sort_key[tier].insert(new_index, new_sort_key)
+
+                self._replica2part2dev[replica][part] = dev['id']
 
         for dev in self._iter_devs():
             del dev['sort_key']
@@ -506,5 +593,19 @@ class RingBuilder(object):
         devs.insert(index, dev)
 
     def _sort_key_for(self, dev):
-        return '%08x.%04x' % (self.parts + dev['parts_wanted'],
-                              randint(0, 0xffff))
+        return '%08x.%04x.%04x' % (self.parts + dev['parts_wanted'],
+                                   randint(0, 0xffff),
+                                   dev['id'])
+
+    def _build_max_replicas_by_tier(self):
+        tier2children = build_tier_tree(self._iter_devs())
+
+        def walk_tree(tier, replica_count):
+            mr = {tier: replica_count}
+            if tier in tier2children:
+                subtiers = tier2children[tier]
+                for subtier in subtiers:
+                    submax = math.ceil(float(replica_count) / len(subtiers))
+                    mr.update(walk_tree(subtier, submax))
+            return mr
+        return walk_tree((), self.replicas)

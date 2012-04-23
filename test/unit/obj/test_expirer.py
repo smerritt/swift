@@ -58,16 +58,16 @@ class FakeRing(object):
                      2: {'ip': '10.0.0.2', 'port': 1000, 'device': 'sda'},
                      3: {'ip': '10.0.0.3', 'port': 1000, 'device': 'sda'},
                      4: {'ip': '10.0.0.4', 'port': 1000, 'device': 'sda'}}
-        self.replica_count = 3
+        self._replica_count = 3
 
     def get_nodes(self, account, container=None, obj=None):
-        return 1, [self.devs[i] for i in xrange(1, self.replica_count + 1)]
+        return 1, [self.devs[i] for i in xrange(1, self._replica_count + 1)]
 
     def get_part_nodes(self, part):
         return self.get_nodes('')[1]
 
     def get_more_nodes(self, nodes):
-        yield self.devs[self.replica_count + 1]
+        yield self.devs[self._replica_count + 1]
 
 
 class TestObjectExpirer(TestCase):
