@@ -265,6 +265,59 @@ swift-ring-builder <builder_file> list_parts <search-value> [<search-value>] ..
                 print '%9d   %7d' % (part, builder.replicas - index)
         exit(EXIT_SUCCESS)
 
+    def debug_dump():
+        """
+swift-ring-builder <builder_file> debug_dump
+
+    Dumps diagnostic output.
+        """
+        d = builder.to_dict()
+        for k in d:
+            if k == '_replica2part2dev':
+                continue
+            v = "%s" % d[k]
+            if len(v) > 1000:
+                v = v[:1000] + "..."
+            print "%s\t%s" % (k, v)
+        for i in xrange(builder.replicas):
+            v = "%s" % builder._replica2part2dev[i]
+            if len(v) > 3000:
+                v = v[:3000] + "..."
+            print "Replica %s\t%s" % (i, v)
+
+        pair_counts = {}
+        device_counts = {}
+
+        for part in xrange(builder.parts):
+            devices = []
+            for replica in xrange(builder.replicas):
+                devid = builder._replica2part2dev[replica][part]
+                devices.append(devid)
+                device_counts[devid] = device_counts.get(devid, 0) + 1
+            devices.sort()
+            key = ','.join(map(str, devices))
+            pair_counts[key] = pair_counts.get(key, 0) + 1
+
+        def meanstdv(x):
+            from math import sqrt
+            n, mean, std = len(x), 0, 0
+            for a in x:
+                mean = mean + a
+            mean = mean / float(n)
+            for a in x:
+                std = std + (a - mean)**2
+            if n == 1:
+                std = 0
+            else:
+                std = sqrt(std / float(n-1))
+            return mean, std
+
+        print "device counts: %s" % device_counts
+        print "device stats: mean=%s stddev=%s" % meanstdv(device_counts.values())
+        print "replica counts: %s" % pair_counts
+        print "replica stats: mean=%s stddev=%s" % meanstdv(pair_counts.values())
+        exit(EXIT_SUCCESS)
+
     def add():
         """
 swift-ring-builder <builder_file> add z<zone>-<ip>:<port>/<device_name>_<meta>
@@ -515,6 +568,46 @@ swift-ring-builder <builder_file> remove <search-value>
                   % dev
         pickle.dump(builder.to_dict(), open(argv[1], 'wb'), protocol=2)
         exit(EXIT_SUCCESS)
+
+    def increment_replicas():
+        """
+swift-ring-builder <builder_file> increment_replicas
+    Attempts to increment the replication count by one.
+        """
+        try:
+            builder.increment_replicas()
+        except exceptions.RingBuilderError, e:
+            print '-' * 79
+            print ("An error has occurred during ring validation. Common\n"
+                   "causes of failure are rings that are empty or do not\n"
+                   "have enough devices to accommodate the replica count.\n"
+                   "Original exception message:\n %s" % e.message
+                   )
+            print '-' * 79
+            exit(EXIT_ERROR)
+        try:
+            builder.validate()
+        except exceptions.RingValidationError, e:
+            print '-' * 79
+            print ("An error has occurred during ring validation. Common\n"
+                   "causes of failure are rings that are empty or do not\n"
+                   "have enough devices to accommodate the replica count.\n"
+                   "Original exception message:\n %s" % e.message
+                   )
+            print '-' * 79
+            exit(EXIT_ERROR)
+
+        status = EXIT_SUCCESS
+        ts = time()
+        pickle.dump(builder.get_ring().to_dict(),
+                    GzipFile(pathjoin(backup_dir, '%d.' % ts +
+                        basename(ring_file)), 'wb'), protocol=2)
+        pickle.dump(builder.to_dict(), open(pathjoin(backup_dir,
+            '%d.' % ts + basename(argv[1])), 'wb'), protocol=2)
+        pickle.dump(builder.get_ring().to_dict(), GzipFile(ring_file, 'wb'),
+                    protocol=2)
+        pickle.dump(builder.to_dict(), open(argv[1], 'wb'), protocol=2)
+        exit(status)
 
     def rebalance():
         """

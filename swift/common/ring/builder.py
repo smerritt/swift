@@ -414,6 +414,23 @@ class RingBuilder(object):
         self._last_part_moves_epoch = int(time())
         self._reassign_parts((p, replicas) for p in xrange(self.parts))
 
+    def increment_replicas(self):
+        """
+        Same strategy as _initial_balance
+        """
+        old_replicas = self.replicas
+        self.replicas = old_replicas + 1
+        self._replica2part2dev.append(array('H', (0 for _junk in xrange(self.parts))))
+
+        self._last_part_moves = array('B', (0 for _junk in xrange(self.parts)))
+        self._last_part_moves_epoch = int(time())
+
+        replicas = [self.replicas - 1]
+        self._set_parts_wanted()
+        self._reassign_parts((p, replicas) for p in xrange(self.parts))
+
+        self.version += 1
+
     def _update_last_part_moves(self):
         """
         Updates how many hours ago each partition was moved based on the
