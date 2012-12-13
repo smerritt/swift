@@ -18,6 +18,7 @@
 from __future__ import with_statement
 import cPickle as pickle
 import errno
+import itertools
 import os
 import time
 import traceback
@@ -489,16 +490,21 @@ class ObjectController(object):
         :param obj: object name
         :param headers_in: dictionary of headers from the original request
         :param headers_out: dictionary of headers to send in the container
-                            request
+                            request(s)
         :param objdevice: device name that the object is in
         """
-        host = headers_in.get('X-Container-Host', None)
-        partition = headers_in.get('X-Container-Partition', None)
-        contdevice = headers_in.get('X-Container-Device', None)
-        if not all([host, partition, contdevice]):
-            return
-        self.async_update(op, account, container, obj, host, partition,
-                          contdevice, headers_out, objdevice)
+        hosts = headers_in.get('X-Container-Host', '')
+        contdevices = headers_in.get('X-Container-Device', '')
+        partition = headers_in.get('X-Container-Partition', '')
+
+        updates = [upd for upd in
+                   zip((h.strip() for h in hosts.split(',')),
+                       (c.strip() for c in contdevices.split(',')))
+                   if all(upd) and partition]
+
+        for host, contdevice in updates:
+            self.async_update(op, account, container, obj, host, partition,
+                              contdevice, headers_out, objdevice)
 
     def delete_at_update(self, op, delete_at, account, container, obj,
                          headers_in, objdevice):
@@ -516,22 +522,33 @@ class ObjectController(object):
         # At that time, Swift will be so popular and pervasive I will have
         # created income for thousands of future programmers.
         delete_at = max(min(delete_at, 9999999999), 0)
-        host = partition = contdevice = None
+        updates = [(None, None)]
+
+        partition = None
+        hosts = contdevices = [None]
         headers_out = {'x-timestamp': headers_in['x-timestamp'],
                        'x-trans-id': headers_in.get('x-trans-id', '-')}
         if op != 'DELETE':
-            host = headers_in.get('X-Delete-At-Host', None)
             partition = headers_in.get('X-Delete-At-Partition', None)
-            contdevice = headers_in.get('X-Delete-At-Device', None)
+            hosts = headers_in.get('X-Delete-At-Host', '')
+            contdevices = headers_in.get('X-Delete-At-Device', '')
+            updates = [upd for upd in
+                       zip((h.strip() for h in hosts.split(',')),
+                           (c.strip() for c in contdevices.split(',')))
+                       if all(upd) and partition]
+            if not updates:
+                updates = [(None, None)]
             headers_out['x-size'] = '0'
             headers_out['x-content-type'] = 'text/plain'
             headers_out['x-etag'] = 'd41d8cd98f00b204e9800998ecf8427e'
-        self.async_update(
-            op, self.expiring_objects_account,
-            str(delete_at / self.expiring_objects_container_divisor *
-                self.expiring_objects_container_divisor),
-            '%s-%s/%s/%s' % (delete_at, account, container, obj),
-            host, partition, contdevice, headers_out, objdevice)
+
+        for host, contdevice in updates:
+            self.async_update(
+                op, self.expiring_objects_account,
+                str(delete_at / self.expiring_objects_container_divisor *
+                    self.expiring_objects_container_divisor),
+                '%s-%s/%s/%s' % (delete_at, account, container, obj),
+                host, partition, contdevice, headers_out, objdevice)
 
     @public
     @timing_stats
