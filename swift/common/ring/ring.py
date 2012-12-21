@@ -241,7 +241,7 @@ class Ring(object):
             self._reload()
         used_tiers = set()
         for part2dev_id in self._replica2part2dev_id:
-            if len(part2dev_id) > part:
+            if part < len(part2dev_id):
                 for tier in tiers_for_dev(self._devs[part2dev_id[part]]):
                     used_tiers.add(tier)
 
