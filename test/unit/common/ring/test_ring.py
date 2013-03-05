@@ -43,7 +43,8 @@ class TestRingData(unittest.TestCase):
 
     def test_attrs(self):
         r2p2d = [[0, 1, 0, 1], [0, 1, 0, 1]]
-        d = [{'id': 0, 'zone': 0}, {'id': 1, 'zone': 1}]
+        d = [{'id': 0, 'zone': 0, 'region': 0},
+             {'id': 1, 'zone': 1, 'region': 1}]
         s = 30
         rd = ring.RingData(r2p2d, d, s)
         self.assertEquals(rd._replica2part2dev_id, r2p2d)
@@ -104,14 +105,14 @@ class TestRing(unittest.TestCase):
             array.array('H', [0, 1, 0, 1]),
             array.array('H', [0, 1, 0, 1]),
             array.array('H', [3, 4, 3, 4])]
-        self.intended_devs = [{'id': 0, 'zone': 0, 'weight': 1.0,
+        self.intended_devs = [{'id': 0, 'region': 0, 'zone': 0, 'weight': 1.0,
                                'ip': '10.1.1.1', 'port': 6000},
-                              {'id': 1, 'zone': 0, 'weight': 1.0,
+                              {'id': 1, 'region': 0, 'zone': 0, 'weight': 1.0,
                                'ip': '10.1.1.1', 'port': 6000},
                               None,
-                              {'id': 3, 'zone': 2, 'weight': 1.0,
+                              {'id': 3, 'region': 0, 'zone': 2, 'weight': 1.0,
                                'ip': '10.1.2.1', 'port': 6000},
-                              {'id': 4, 'zone': 2, 'weight': 1.0,
+                              {'id': 4, 'region': 0, 'zone': 2, 'weight': 1.0,
                                'ip': '10.1.2.2', 'port': 6000}]
         self.intended_part_shift = 30
         self.intended_reload_time = 15
@@ -149,7 +150,7 @@ class TestRing(unittest.TestCase):
                     ring_name='whatever')
         orig_mtime = self.ring._mtime
         self.assertEquals(len(self.ring.devs), 5)
-        self.intended_devs.append({'id': 3, 'zone': 3, 'weight': 1.0})
+        self.intended_devs.append({'id': 3, 'region': 0, 'zone': 3, 'weight': 1.0})
         ring.RingData(self.intended_replica2part2dev_id,
             self.intended_devs, self.intended_part_shift).save(self.testgz)
         sleep(0.1)
@@ -162,7 +163,7 @@ class TestRing(unittest.TestCase):
                     ring_name='whatever')
         orig_mtime = self.ring._mtime
         self.assertEquals(len(self.ring.devs), 6)
-        self.intended_devs.append({'id': 5, 'zone': 4, 'weight': 1.0})
+        self.intended_devs.append({'id': 5, 'region': 0, 'zone': 4, 'weight': 1.0})
         ring.RingData(self.intended_replica2part2dev_id,
             self.intended_devs, self.intended_part_shift).save(self.testgz)
         sleep(0.1)
@@ -176,7 +177,7 @@ class TestRing(unittest.TestCase):
         orig_mtime = self.ring._mtime
         part, nodes = self.ring.get_nodes('a')
         self.assertEquals(len(self.ring.devs), 7)
-        self.intended_devs.append({'id': 6, 'zone': 5, 'weight': 1.0})
+        self.intended_devs.append({'id': 6, 'region': 0, 'zone': 5, 'weight': 1.0})
         ring.RingData(self.intended_replica2part2dev_id,
             self.intended_devs, self.intended_part_shift).save(self.testgz)
         sleep(0.1)
@@ -189,7 +190,7 @@ class TestRing(unittest.TestCase):
                     ring_name='whatever')
         orig_mtime = self.ring._mtime
         self.assertEquals(len(self.ring.devs), 8)
-        self.intended_devs.append({'id': 5, 'zone': 4, 'weight': 1.0})
+        self.intended_devs.append({'id': 5, 'region': 0, 'zone': 4, 'weight': 1.0})
         ring.RingData(self.intended_replica2part2dev_id,
             self.intended_devs, self.intended_part_shift).save(self.testgz)
         sleep(0.1)
@@ -311,7 +312,8 @@ class TestRing(unittest.TestCase):
                 for device in xrange(1, 4):
                     rb.add_dev({'id': next_dev_id,
                                 'ip': '1.2.%d.%d' % (zone, server),
-                                'port': 1234, 'zone': zone, 'weight': 1.0})
+                                'port': 1234, 'zone': zone, 'region': 0,
+                                'weight': 1.0})
                     next_dev_id += 1
         rb.rebalance(seed=1)
         rb.get_ring().save(self.testgz)
@@ -339,7 +341,7 @@ class TestRing(unittest.TestCase):
         server = 0
         rb.add_dev({'id': next_dev_id,
                     'ip': '1.2.%d.%d' % (zone, server),
-                    'port': 1234, 'zone': zone, 'weight': 1.0})
+                    'port': 1234, 'zone': zone, 'region': 0, 'weight': 1.0})
         next_dev_id += 1
         rb.rebalance(seed=1)
         rb.get_ring().save(self.testgz)

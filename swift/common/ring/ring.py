@@ -38,6 +38,10 @@ class RingData(object):
         self._replica2part2dev_id = replica2part2dev_id
         self._part_shift = part_shift
 
+        for dev in self.devs:
+            if dev is not None:
+                dev.setdefault("region", 1)
+
     @classmethod
     def deserialize_v1(cls, gz_file):
         json_len, = struct.unpack('!I', gz_file.read(4))
