@@ -66,6 +66,7 @@ SysLogHandler.priority_map['NOTICE'] = 'notice'
 # These are lazily pulled from libc elsewhere
 _sys_fallocate = None
 _posix_fadvise = None
+_sys_sendfile = None
 
 # If set to non-zero, fallocate routines will fail based on free space
 # available being at or below this amount, in bytes.
@@ -258,7 +259,7 @@ def sendfile(out_fd, in_fd, offset=None, count=None):
         offset_ptr = ctypes.POINTER(ctypes.c_uint64)()   # null pointer
 
     if count is None:
-        file_size = os.fstat(in_fd).size
+        file_size = os.fstat(in_fd).st_size
         count = file_size - (offset or 0)
 
     sent = _sys_sendfile(out_fd, in_fd, offset_ptr, ctypes.c_uint64(count))
