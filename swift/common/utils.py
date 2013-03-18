@@ -230,6 +230,45 @@ def fallocate(fd, size):
         raise OSError(err, 'Unable to fallocate(%s)' % size)
 
 
+def sendfile(out_fd, in_fd, offset=None, count=None):
+    """
+    Use the sendfile() system call to shove some data from a file out of a
+    socket quickly.
+
+    :param out_fd: the socket's fd
+    :param in_fd: the file's fd. Not file-like object. A file.
+    :param offset: (optional) the offset from the start of the file.
+    :param count: (optional) number of bytes to send. Defaults to the size of
+        the file minus the offset(that is, starting at the offset, send the
+        rest of the file).
+
+    :returns: the number of bytes sent
+
+    Note: completely Linux-specific. If we want Swift to run on other
+    platforms, we'll have to figure this out for them too.
+    """
+    global _sys_sendfile
+    if _sys_sendfile is None:
+        _sys_sendfile = load_libc_function('sendfile')
+
+    if offset is not None:
+        offset_int = ctypes.c_uint64(offset)
+        offset_ptr = ctypes.pointer(offset_int)
+    else:
+        offset_ptr = ctypes.POINTER(ctypes.c_uint64)()   # null pointer
+
+    if count is None:
+        file_size = os.fstat(in_fd).size
+        count = file_size - (offset or 0)
+
+    sent = _sys_sendfile(out_fd, in_fd, offset_ptr, ctypes.c_uint64(count))
+    err = ctypes.get_errno()
+    if sent < 0:
+        raise OSError(err, "sendfile(%d, %d, %r, %d) failed w/errno %d" %
+                      (out_fd, in_fd, offset_ptr, count))
+    return sent
+
+
 def fsync(fd):
     """
     Sync modified file data and metadata to disk.
