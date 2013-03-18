@@ -105,6 +105,170 @@ def get_socket(conf, default_port=8080):
     return sock
 
 
+# woo, more shit to import
+_AlreadyHandled = wsgi._AlreadyHandled
+format_date_time = wsgi.format_date_time
+
+class AmazingSpeedyHttpProtocol(wsgi.HttpProtocol):
+    def handle_one_response(self):
+        start = time.time()
+        headers_set = []
+        headers_sent = []
+
+        wfile = self.wfile
+        result = None
+        use_chunked = [False]
+        length = [0]
+        status_code = [200]
+
+        def write(data, _writelines=wfile.writelines):
+            towrite = []
+            if not headers_set:
+                raise AssertionError("write() before start_response()")
+            elif not headers_sent:
+                status, response_headers = headers_set
+                headers_sent.append(1)
+                header_list = [header[0].lower() for header in response_headers]
+                towrite.append('%s %s\r\n' % (self.protocol_version, status))
+                for header in response_headers:
+                    towrite.append('%s: %s\r\n' % header)
+
+                # send Date header?
+                if 'date' not in header_list:
+                    towrite.append('Date: %s\r\n' % (format_date_time(time.time()),))
+
+                client_conn = self.headers.get('Connection', '').lower()
+                send_keep_alive = False
+                if self.close_connection == 0 and \
+                   self.server.keepalive and (client_conn == 'keep-alive' or \
+                    (self.request_version == 'HTTP/1.1' and
+                     not client_conn == 'close')):
+                        # only send keep-alives back to clients that sent them,
+                        # it's redundant for 1.1 connections
+                        send_keep_alive = (client_conn == 'keep-alive')
+                        self.close_connection = 0
+                else:
+                    self.close_connection = 1
+
+                if 'content-length' not in header_list:
+                    if self.request_version == 'HTTP/1.1':
+                        use_chunked[0] = True
+                        towrite.append('Transfer-Encoding: chunked\r\n')
+                    elif 'content-length' not in header_list:
+                        # client is 1.0 and therefore must read to EOF
+                        self.close_connection = 1
+
+                if self.close_connection:
+                    towrite.append('Connection: close\r\n')
+                elif send_keep_alive:
+                    towrite.append('Connection: keep-alive\r\n')
+                towrite.append('\r\n')
+                # end of header writing
+
+            if use_chunked[0]:
+                ## Write the chunked encoding
+                towrite.append("%x\r\n%s\r\n" % (len(data), data))
+            else:
+                towrite.append(data)
+            try:
+                _writelines(towrite)
+                length[0] = length[0] + sum(map(len, towrite))
+            except UnicodeEncodeError:
+                self.server.log_message("Encountered non-ascii unicode while attempting to write wsgi response: %r" % [x for x in towrite if isinstance(x, unicode)])
+                self.server.log_message(traceback.format_exc())
+                _writelines(
+                    ["HTTP/1.1 500 Internal Server Error\r\n",
+                    "Connection: close\r\n",
+                    "Content-type: text/plain\r\n",
+                    "Content-length: 98\r\n",
+                    "Date: %s\r\n" % format_date_time(time.time()),
+                    "\r\n",
+                    ("Internal Server Error: wsgi application passed "
+                     "a unicode object to the server instead of a string.")])
+
+        def start_response(status, response_headers, exc_info=None):
+            status_code[0] = status.split()[0]
+            if exc_info:
+                try:
+                    if headers_sent:
+                        # Re-raise original exception if headers sent
+                        raise exc_info[0], exc_info[1], exc_info[2]
+                finally:
+                    # Avoid dangling circular ref
+                    exc_info = None
+
+            capitalized_headers = [('-'.join([x.capitalize()
+                                              for x in key.split('-')]), value)
+                                   for key, value in response_headers]
+
+            headers_set[:] = [status, capitalized_headers]
+            return write
+
+        try:
+            try:
+                result = self.application(self.environ, start_response)
+                if (isinstance(result, _AlreadyHandled)
+                    or isinstance(getattr(result, '_obj', None), _AlreadyHandled)):
+                    self.close_connection = 1
+                    return
+                if not headers_sent and hasattr(result, '__len__') and \
+                        'Content-Length' not in [h for h, _v in headers_set[1]]:
+                    headers_set[1].append(('Content-Length', str(sum(map(len, result)))))
+                towrite = []
+                towrite_size = 0
+                just_written_size = 0
+                for data in result:
+                    towrite.append(data)
+                    towrite_size += len(data)
+                    if towrite_size >= self.minimum_chunk_size:
+                        write(''.join(towrite))
+                        towrite = []
+                        just_written_size = towrite_size
+                        towrite_size = 0
+                if towrite:
+                    just_written_size = towrite_size
+                    write(''.join(towrite))
+                if not headers_sent or (use_chunked[0] and just_written_size):
+                    write('')
+            except Exception, e:
+                self.close_connection = 1
+                tb = traceback.format_exc()
+                self.server.log_message(tb)
+                if not headers_set:
+                    err_body = ""
+                    if(self.server.debug):
+                        err_body = tb
+                    start_response("500 Internal Server Error",
+                                   [('Content-type', 'text/plain'),
+                                    ('Content-length', len(err_body))])
+                    write(err_body)
+        finally:
+            if hasattr(result, 'close'):
+                result.close()
+            if (self.environ['eventlet.input'].chunked_input or
+                    self.environ['eventlet.input'].position \
+                    < self.environ['eventlet.input'].content_length):
+                ## Read and discard body if there was no pending 100-continue
+                if not self.environ['eventlet.input'].wfile:
+                    while self.environ['eventlet.input'].read(MINIMUM_CHUNK_SIZE):
+                        pass
+            finish = time.time()
+
+            for hook, args, kwargs in self.environ['eventlet.posthooks']:
+                hook(self.environ, *args, **kwargs)
+
+            if self.server.log_output:
+
+                self.server.log_message(self.server.log_format % dict(
+                    client_ip=self.get_client_ip(),
+                    date_time=self.log_date_time_string(),
+                    request_line=self.requestline,
+                    status_code=status_code[0],
+                    body_length=length[0],
+                    wall_seconds=finish - start))
+
+
+
 # TODO: pull pieces of this out to test
 def run_wsgi(conf_file, app_section, *args, **kwargs):
     """
@@ -149,7 +313,8 @@ def run_wsgi(conf_file, app_section, *args, **kwargs):
                       global_conf={'log_name': log_name})
         pool = GreenPool(size=1024)
         try:
-            wsgi.server(sock, app, NullLogger(), custom_pool=pool)
+            wsgi.server(sock, app, NullLogger(), custom_pool=pool,
+                        protocol=AmazingSpeedyHttpProtocol)
         except socket.error, err:
             if err[0] != errno.EINVAL:
                 raise
