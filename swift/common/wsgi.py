@@ -165,11 +165,12 @@ class AmazingSpeedyHttpProtocol(wsgi.HttpProtocol):
                 towrite.append('\r\n')
                 # end of header writing
 
-            if use_chunked[0]:
-                ## Write the chunked encoding
-                towrite.append("%x\r\n%s\r\n" % (len(data), data))
-            else:
-                towrite.append(data)
+            if data:
+                if use_chunked[0]:
+                    ## Write the chunked encoding
+                    towrite.append("%x\r\n%s\r\n" % (len(data), data))
+                else:
+                    towrite.append(data)
             try:
                 _writelines(towrite)
                 length[0] = length[0] + sum(map(len, towrite))
@@ -213,7 +214,15 @@ class AmazingSpeedyHttpProtocol(wsgi.HttpProtocol):
                     return
                 if not headers_sent and hasattr(result, '__len__') and \
                         'Content-Length' not in [h for h, _v in headers_set[1]]:
-                    headers_set[1].append(('Content-Length', str(sum(map(len, result)))))
+                    headers_set[1].append(('Content-Length',
+                                           str(sum(map(len, result)))))
+
+                # THIS IS WHERE THE MAGIC HAPPENS
+                if getattr(result, 'lord_of_the_sendfiles', None):
+                    write('')  # force headers out
+                    result.lord_of_the_sendfiles(self.wfile)
+                    return
+
                 towrite = []
                 towrite_size = 0
                 just_written_size = 0

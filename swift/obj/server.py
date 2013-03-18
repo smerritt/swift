@@ -33,7 +33,7 @@ from eventlet import sleep, Timeout, tpool
 from swift.common.utils import mkdirs, normalize_timestamp, public, \
     storage_directory, hash_path, renamer, fallocate, fsync, fdatasync, \
     split_path, drop_buffer_cache, get_logger, write_pickle, \
-    config_true_value, validate_device_partition, timing_stats
+    config_true_value, validate_device_partition, timing_stats, sendfile
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, check_mount, \
     check_float, check_utf8
@@ -155,6 +155,19 @@ class DiskFile(object):
                     if key.lower() not in DISALLOWED_HEADERS:
                         del self.metadata[key]
                 self.metadata.update(read_metadata(mfp))
+
+
+    def lord_of_the_sendfiles(self, outsock):
+        """Send it with sendfile()"""
+        # XXX someday, this'll need to do something smart with ranges. For
+        # now, fuck it.
+        import q; q.q(at="before sendfile")
+        try:
+            written = sendfile(outsock.fileno(), self.fp.fileno())
+            import q; q.q(written)
+        except Exception, e:
+            import q; q.q(e)
+
 
     def __iter__(self):
         """Returns an iterator over the data file."""
