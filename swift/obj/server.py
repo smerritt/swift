@@ -20,15 +20,20 @@ import cPickle as pickle
 import errno
 import os
 import time
+import threading
 import traceback
+from collections import defaultdict
 from datetime import datetime
 from hashlib import md5
+from Queue import Queue, Empty
 from tempfile import mkstemp
 from urllib import unquote
 from contextlib import contextmanager
 
 from xattr import getxattr, setxattr
-from eventlet import sleep, Timeout, tpool
+from eventlet import event, sleep, Timeout, greenthread, greenio
+
+import q
 
 from swift.common.utils import mkdirs, normalize_timestamp, public, \
     storage_directory, hash_path, renamer, fallocate, fsync, fdatasync, \
@@ -39,7 +44,7 @@ from swift.common.constraints import check_object_creation, check_mount, \
     check_float, check_utf8
 from swift.common.exceptions import ConnectionTimeout, DiskFileError, \
     DiskFileNotExist
-from swift.obj.replicator import tpool_reraise, invalidate_hash, \
+from swift.obj.replicator import invalidate_hash, \
     quarantine_renamer, get_hashes
 from swift.common.http import is_success
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPCreated, \
@@ -92,6 +97,134 @@ def write_metadata(fd, metadata):
         key += 1
 
 
+class DummyThreadPool(object):
+    """
+    Used when threadpools are disabled; does not actually do any sort of
+    threading.
+    """
+    def __init(self, nthreads=2):
+        pass
+
+    def run_in_thread(self, func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+
+class ThreadPool(object):
+    BYTE = 'a'.encode('utf-8')
+
+    """
+    Perform blocking operations in background threads.
+
+    Call its methods from within greenlets to green-wait for results without
+    blocking the eventlet reactor (hopefully).
+    """
+    def __init__(self, nthreads=8):
+        self._run_queue = Queue()
+        self._result_queue = Queue()
+        self._threads = []
+
+        # We spawn a greenthread whose job it is to pull results from the
+        # worker threads via a real Queue and send them to eventlet Events so
+        # that the calling greenthreads can be awoken.
+        #
+        # Since each OS thread has its own collection of greenthreads, it
+        # doesn't work to have the worker thread send stuff to the event, as
+        # it then notifies its own thread-local eventlet hub to wake up, which
+        # doesn't do anything to help out the actual calling greenthread over
+        # in the main thread.
+        #
+        # Thus, each worker sticks its results into a result queue and then
+        # writes a byte to a pipe, signaling the result-consuming greenlet (in
+        # the main thread) to wake up and consume a result.
+        #
+        # This is all stuff that eventlet.tpool does, but that code is a mess
+        # of global variables with cryptic names, and perhaps more
+        # importantly, can't have multiple instances instantiated. Since the
+        # object server uses one pool per disk, we have to reimplement this
+        # stuff.
+        _real_rpipe, self.wpipe = os.pipe()
+        self.rpipe = greenio.GreenPipe(_real_rpipe, 'rb', bufsize=0)
+
+        for _junk in xrange(nthreads):
+            thr = threading.Thread(target=self._worker,
+                                   args=(self._run_queue, self._result_queue))
+            thr.daemon = True
+            thr.start()
+            self._threads.append(thr)
+
+        # Pass this in because we might someday want more than one consumer
+        # coro. If we had N OS threads and N coros, then we could get up to N
+        # results pushed into the main thread per trip through the greenlet
+        # reactor.
+        self._consumer_coro = greenthread.spawn_n(self._consume_results,
+                                                  self._result_queue)
+
+    def _worker(self, work_queue, result_queue):
+        """
+        Pulls an item from the queue and runs it, then puts the result into
+        the result queue. Repeats forever.
+
+        :param work_queue: queue from which to pull work
+        :param result_queue: queue into which to place results
+        """
+        while True:
+            item = work_queue.get()
+            work_queue.task_done()
+            event, func, args, kwargs = item
+            try:
+                result = func(*args, **kwargs)
+                result_queue.put((event, True, result))
+            except Exception, err:
+                result_queue.put((event, False, err))
+            finally:
+                os.write(self.wpipe, self.BYTE)
+
+    def _consume_results(self, queue):
+        """
+        Runs as a greenthread in the same OS thread as callers of
+        run_in_thread().
+
+        Takes results from the worker OS threads and sends them to the waiting
+        greenthreads.
+        """
+        while True:
+            try:
+                self.rpipe.read(1)
+            except ValueError:
+                # can happen at process shutdown when pipe is closed
+                break
+
+            while True:
+                try:
+                    event, success, result = queue.get(block=False)
+                    queue.task_done()
+                except Empty:
+                    break
+
+                if success:
+                    event.send(result)
+                else:
+                    event.send_exception(result)
+
+    def run_in_thread(self, func, *args, **kwargs):
+        """
+        Runs func(*args, **kwargs) in a thread. Blocks the current greenlet
+        until results are available.
+
+        :returns: result of calling func
+
+        """
+        ev = event.Event()
+
+        # I'd rather blow up than block the reactor
+        self._run_queue.put((ev, func, args, kwargs), block=False)
+
+        # blocks this greenlet (and only *this* greenlet) until the real
+        # thread calls ev.send().
+        result = ev.wait()
+        return result
+
+
 class DiskFile(object):
     """
     Manage object files on disk.
@@ -105,11 +238,13 @@ class DiskFile(object):
     :param keep_data_fp: if True, don't close the fp, otherwise close it
     :param disk_chunk_size: size of chunks on file reads
     :param iter_hook: called when __iter__ returns a chunk
+    :param threadpool: thread pool in which to do blocking operations
     """
 
     def __init__(self, path, device, partition, account, container, obj,
                  logger, keep_data_fp=False, disk_chunk_size=65536,
-                 iter_hook=None):
+                 iter_hook=None, threadpool=None):
+        q.q(path, device, account, container, obj)
         self.disk_chunk_size = disk_chunk_size
         self.iter_hook = iter_hook
         self.name = '/' + '/'.join((account, container, obj))
@@ -130,6 +265,7 @@ class DiskFile(object):
         self.quarantined_dir = None
         self.keep_cache = False
         self.suppress_file_closing = False
+        self.threadpool = threadpool or DummyThreadPool()
         if not os.path.exists(self.datadir):
             return
         files = sorted(os.listdir(self.datadir), reverse=True)
@@ -167,7 +303,8 @@ class DiskFile(object):
                 self.started_at_0 = True
                 self.iter_etag = md5()
             while True:
-                chunk = self.fp.read(self.disk_chunk_size)
+                chunk = self.threadpool.run_in_thread(
+                    self.fp.read, self.disk_chunk_size)
                 if chunk:
                     if self.iter_etag:
                         self.iter_etag.update(chunk)
@@ -309,7 +446,7 @@ class DiskFile(object):
         write_metadata(fd, metadata)
         if 'Content-Length' in metadata:
             self.drop_cache(fd, 0, int(metadata['Content-Length']))
-        tpool.execute(fsync, fd)
+        self.threadpool.run_in_thread(fsync, fd)
         invalidate_hash(os.path.dirname(self.datadir))
         renamer(self.tmppath,
                 os.path.join(self.datadir, timestamp + extension))
@@ -412,6 +549,9 @@ class ObjectController(object):
         self.max_upload_time = int(conf.get('max_upload_time', 86400))
         self.slow = int(conf.get('slow', 0))
         self.bytes_per_sync = int(conf.get('mb_per_sync', 512)) * 1024 * 1024
+        # XXX have a configurable count, or maybe even make use of a
+        # threadpool configurable or something
+        self.threadpools = defaultdict(lambda: ThreadPool())
         default_allowed_headers = '''
             content-disposition,
             content-encoding,
@@ -585,7 +725,8 @@ class ObjectController(object):
         if self.mount_check and not check_mount(self.devices, device):
             return HTTPInsufficientStorage(drive=device, request=request)
         file = DiskFile(self.devices, device, partition, account, container,
-                        obj, self.logger, disk_chunk_size=self.disk_chunk_size)
+                        obj, self.logger, disk_chunk_size=self.disk_chunk_size,
+                        threadpool=self.threadpools[device])
 
         if file.is_deleted() or file.is_expired():
             return HTTPNotFound(request=request)
@@ -637,7 +778,8 @@ class ObjectController(object):
             return HTTPBadRequest(body='X-Delete-At in past', request=request,
                                   content_type='text/plain')
         file = DiskFile(self.devices, device, partition, account, container,
-                        obj, self.logger, disk_chunk_size=self.disk_chunk_size)
+                        obj, self.logger, disk_chunk_size=self.disk_chunk_size,
+                        threadpool=self.threadpools[device])
         orig_timestamp = file.metadata.get('X-Timestamp')
         upload_expiration = time.time() + self.max_upload_time
         etag = md5()
@@ -662,7 +804,7 @@ class ObjectController(object):
                     chunk = chunk[written:]
                 # For large files sync every 512MB (by default) written
                 if upload_size - last_sync >= self.bytes_per_sync:
-                    tpool.execute(fdatasync, fd)
+                    self.threadpools[device].run_in_thread(fdatasync, fd)
                     drop_buffer_cache(fd, last_sync, upload_size - last_sync)
                     last_sync = upload_size
                 sleep()
@@ -733,7 +875,7 @@ class ObjectController(object):
         file = DiskFile(self.devices, device, partition, account, container,
                         obj, self.logger, keep_data_fp=True,
                         disk_chunk_size=self.disk_chunk_size,
-                        iter_hook=sleep)
+                        iter_hook=sleep, threadpool=self.threadpools[device])
         if file.is_deleted() or file.is_expired():
             if request.headers.get('if-match') == '*':
                 return HTTPPreconditionFailed(request=request)
@@ -813,7 +955,8 @@ class ObjectController(object):
         if self.mount_check and not check_mount(self.devices, device):
             return HTTPInsufficientStorage(drive=device, request=request)
         file = DiskFile(self.devices, device, partition, account, container,
-                        obj, self.logger, disk_chunk_size=self.disk_chunk_size)
+                        obj, self.logger, disk_chunk_size=self.disk_chunk_size,
+                        threadpool=self.threadpools[device])
         if file.is_deleted() or file.is_expired():
             return HTTPNotFound(request=request)
         try:
@@ -905,7 +1048,8 @@ class ObjectController(object):
         if not os.path.exists(path):
             mkdirs(path)
         suffixes = suffix.split('-') if suffix else []
-        _junk, hashes = tpool_reraise(get_hashes, path, recalculate=suffixes)
+        self.threadpools[device].run_in_thread(get_hashes, path,
+                                               recalculate=suffixes)
         return Response(body=pickle.dumps(hashes))
 
     def __call__(self, env, start_response):
