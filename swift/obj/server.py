@@ -33,8 +33,6 @@ from contextlib import contextmanager
 from xattr import getxattr, setxattr
 from eventlet import event, sleep, Timeout, greenthread, greenio
 
-import q
-
 from swift.common.utils import mkdirs, normalize_timestamp, public, \
     storage_directory, hash_path, renamer, fallocate, fsync, fdatasync, \
     split_path, drop_buffer_cache, get_logger, write_pickle, \
@@ -244,7 +242,6 @@ class DiskFile(object):
     def __init__(self, path, device, partition, account, container, obj,
                  logger, keep_data_fp=False, disk_chunk_size=65536,
                  iter_hook=None, threadpool=None):
-        q.q(path, device, account, container, obj)
         self.disk_chunk_size = disk_chunk_size
         self.iter_hook = iter_hook
         self.name = '/' + '/'.join((account, container, obj))
