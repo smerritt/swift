@@ -100,7 +100,7 @@ class DummyThreadPool(object):
     Used when threadpools are disabled; does not actually do any sort of
     threading.
     """
-    def __init(self, nthreads=2):
+    def __init__(self, nthreads=2):
         pass
 
     def run_in_thread(self, func, *args, **kwargs):
