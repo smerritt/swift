@@ -1045,8 +1045,8 @@ class ObjectController(object):
         if not os.path.exists(path):
             mkdirs(path)
         suffixes = suffix.split('-') if suffix else []
-        self.threadpools[device].run_in_thread(get_hashes, path,
-                                               recalculate=suffixes)
+        _junk, hashes = self.threadpools[device].run_in_thread(
+            get_hashes, path, recalculate=suffixes)
         return Response(body=pickle.dumps(hashes))
 
     def __call__(self, env, start_response):
