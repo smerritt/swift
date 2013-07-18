@@ -14,9 +14,6 @@
 # limitations under the License.
 
 import unittest
-import mock
-
-from test.unit import MockTrue
 
 from swift.common.swob import HTTPBadRequest, Request
 from swift.common.http import HTTP_REQUEST_ENTITY_TOO_LARGE, \
@@ -185,16 +182,6 @@ class TestConstraints(unittest.TestCase):
             headers={'X-Object-Manifest': 'http://host/container/prefix',
             'Content-Length': '0', 'Content-Type': 'text/plain'}), 'manifest')
         self.assertEquals(resp.status_int, HTTP_BAD_REQUEST)
-
-    def test_check_mount(self):
-        self.assertFalse(constraints.check_mount('', ''))
-        with mock.patch("swift.common.constraints.ismount", MockTrue()):
-            self.assertTrue(constraints.check_mount('/srv', '1'))
-            self.assertTrue(constraints.check_mount('/srv', 'foo-bar'))
-            self.assertTrue(constraints.check_mount('/srv', '003ed03c-242a-4b2f-bee9-395f801d1699'))
-            self.assertFalse(constraints.check_mount('/srv', 'foo bar'))
-            self.assertFalse(constraints.check_mount('/srv', 'foo/bar'))
-            self.assertFalse(constraints.check_mount('/srv', 'foo?bar'))
 
     def test_check_float(self):
         self.assertFalse(constraints.check_float(''))

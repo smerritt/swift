@@ -16,7 +16,7 @@
 """ Tests for swift.common.utils """
 
 from __future__ import with_statement
-from test.unit import temptree
+from test.unit import temptree, MockTrue
 
 import ctypes
 import errno
@@ -1534,6 +1534,32 @@ log_name = %(yarr)s'''
                     pass
         finally:
             shutil.rmtree(tmpdir)
+
+    def test_check_mount(self):
+        self.assertFalse(utils.check_mount('', ''))
+        with patch("swift.common.utils.ismount", MockTrue()):
+            self.assertTrue(utils.check_mount('/srv', '1'))
+            self.assertTrue(utils.check_mount('/srv', 'foo-bar'))
+            self.assertTrue(utils.check_mount('/srv', '003ed03c-242a-4b2f-bee9-395f801d1699'))
+            self.assertFalse(utils.check_mount('/srv', 'foo bar'))
+            self.assertFalse(utils.check_mount('/srv', 'foo/bar'))
+            self.assertFalse(utils.check_mount('/srv', 'foo?bar'))
+
+    def test_check_mount_cache(self):
+        counter = [100.0]
+        def mytime():
+            counter[0] += 0.1
+            return counter[0]
+        with patch("time.time", mytime):
+            with patch("swift.common.utils.ismount", lambda *args: True):
+                self.assertTrue(utils.check_mount('/srv', 'mounted'))
+            with patch("swift.common.utils.ismount", lambda *args: False):
+                # Should still report true since it is cached and the time has
+                # not advanced more than a second.
+                self.assertTrue(utils.check_mount('/srv', 'mounted'))
+                counter[0] += (utils.CHECK_MOUNT_CACHE_TIME + 1)
+                # Now it should recheck and see that it is not mounted.
+                self.assertFalse(utils.check_mount('/srv', 'mounted'))
 
     def test_parse_content_type(self):
         self.assertEquals(utils.parse_content_type('text/plain'),

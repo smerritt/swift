@@ -32,10 +32,9 @@ from contextlib import contextmanager
 from xattr import getxattr, setxattr
 from eventlet import Timeout
 
-from swift.common.constraints import check_mount
 from swift.common.utils import mkdirs, normalize_timestamp, \
-    storage_directory, hash_path, renamer, fallocate, fsync, \
-    fdatasync, drop_buffer_cache, ThreadPool, lock_path, write_pickle
+    storage_directory, hash_path, renamer, fallocate, fsync, fdatasync, \
+    drop_buffer_cache, ThreadPool, lock_path, write_pickle, check_mount
 from swift.common.exceptions import DiskFileError, DiskFileNotExist, \
     DiskFileCollision, DiskFileNoSpace, DiskFileDeviceUnavailable, \
     PathNotDir

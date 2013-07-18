@@ -29,12 +29,12 @@ from urllib import unquote
 from eventlet import sleep, Timeout
 
 from swift.common.utils import mkdirs, normalize_timestamp, public, \
-    hash_path, split_path, get_logger, write_pickle, \
+    hash_path, split_path, get_logger, write_pickle, check_mount, \
     config_true_value, validate_device_partition, timing_stats, \
     ThreadPool, replication
 from swift.common.bufferedhttp import http_connect
-from swift.common.constraints import check_object_creation, check_mount, \
-    check_float, check_utf8
+from swift.common.constraints import check_object_creation, check_float, \
+    check_utf8
 from swift.common.exceptions import ConnectionTimeout, DiskFileError, \
     DiskFileNotExist, DiskFileCollision, DiskFileNoSpace, \
     DiskFileDeviceUnavailable

@@ -30,9 +30,9 @@ from swift.common.request_helpers import get_param
 from swift.common.utils import get_logger, hash_path, public, \
     normalize_timestamp, storage_directory, validate_sync_to, \
     config_true_value, validate_device_partition, json, timing_stats, \
-    replication, parse_content_type
+    replication, parse_content_type, check_mount
 from swift.common.constraints import CONTAINER_LISTING_LIMIT, \
-    check_mount, check_float, check_utf8, FORMAT2CONTENT_TYPE
+    check_float, check_utf8, FORMAT2CONTENT_TYPE
 from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ConnectionTimeout
 from swift.common.db_replicator import ReplicatorRpc

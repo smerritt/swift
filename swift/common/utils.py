@@ -25,6 +25,7 @@ import sys
 import threading as stdlib_threading
 import time
 import uuid
+import urllib
 import functools
 from hashlib import md5
 from random import random, shuffle
@@ -47,6 +48,7 @@ import glob
 from urlparse import urlparse as stdlib_urlparse, ParseResult
 import itertools
 import stat
+from collections import defaultdict
 
 import eventlet
 import eventlet.semaphore
@@ -80,21 +82,32 @@ _posix_fadvise = None
 # available being at or below this amount, in bytes.
 FALLOCATE_RESERVE = 0
 
+swift_conf = ConfigParser()
+
 # Used by hash_path to offer a bit more security when generating hashes for
 # paths. It simply appends this value to all paths; guessing the hash a path
 # will end up with would also require knowing this suffix.
-hash_conf = ConfigParser()
 HASH_PATH_SUFFIX = ''
 HASH_PATH_PREFIX = ''
-if hash_conf.read('/etc/swift/swift.conf'):
+
+# Time (in seconds) to cache the result of checking if a given path is a mount
+# point. Setting this to zero (0) disables the caching.
+CHECK_MOUNT_CACHE_TIME = 10
+
+if swift_conf.read('/etc/swift/swift.conf'):
     try:
-        HASH_PATH_SUFFIX = hash_conf.get('swift-hash',
-                                         'swift_hash_path_suffix')
+        HASH_PATH_SUFFIX = swift_conf.get('swift-hash',
+                                          'swift_hash_path_suffix')
     except (NoSectionError, NoOptionError):
         pass
     try:
-        HASH_PATH_PREFIX = hash_conf.get('swift-hash',
-                                         'swift_hash_path_prefix')
+        HASH_PATH_PREFIX = swift_conf.get('swift-hash',
+                                          'swift_hash_path_prefix')
+    except (NoSectionError, NoOptionError):
+        pass
+    try:
+        CHECK_MOUNT_CACHE_TIME = int(swift_conf.get('swift-disk',
+                                                    'check_mount_cache_time'))
     except (NoSectionError, NoOptionError):
         pass
 
@@ -1528,7 +1541,7 @@ def audit_location_generator(devices, datadir, suffix='',
     shuffle(device_dir)
     for device in device_dir:
         if mount_check and not \
-                os.path.ismount(os.path.join(devices, device)):
+                ismount(os.path.join(devices, device)):
             if logger:
                 logger.debug(
                     _('Skipping %s as it is not mounted'), device)
@@ -2212,6 +2225,55 @@ def ismount(path):
         return True
 
     return False
+
+
+def _def_val(*args, **kwargs):
+    return (0, False)
+
+
+_drive_mount_check = defaultdict(_def_val)
+
+
+def _check_mount(root, drive):
+    """
+    Verify that the path to the drive is a mount point and mounted.  This
+    allows us to fast fail on drives that have been unmounted because of
+    issues, and also prevents us for accidentally filling up the root
+    partition.
+
+    :param root:  base path where the drives are mounted
+    :param drive: drive name to be checked
+    :returns: True if it is a valid mounted drive, False otherwise
+    """
+    if not (urllib.quote_plus(drive) == drive):
+        return False
+    path = os.path.join(root, drive)
+    return ismount(path)
+
+
+def check_mount(root, drive):
+    """
+    Verify that the path to the drive is a mount point and mounted.  This
+    allows us to fast fail on drives that have been unmounted because of
+    issues, and also prevents us for accidentally filling up the root
+    partition.
+
+    The result is cached per drive and only checked once a second. For very
+    high request rates this can cut down the stat traffic significantly.
+
+    :param root:  base path where the drives are mounted
+    :param drive: drive name to be checked
+    :returns: True if it is a valid mounted drive, False otherwise
+    """
+    if CHECK_MOUNT_CACHE_TIME <= 0:
+        val = _check_mount(root, drive)
+    else:
+        curr_time = int(time.time())
+        last_time, val = _drive_mount_check[drive]
+        if curr_time > last_time + CHECK_MOUNT_CACHE_TIME:
+            val = _check_mount(root, drive)
+            _drive_mount_check[drive] = (curr_time, val)
+    return val
 
 
 _rfc_token = r'[^()<>@,;:\"/\[\]?={}\x00-\x20\x7f]+'
