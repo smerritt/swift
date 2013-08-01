@@ -8,6 +8,35 @@
 swift_hash_path_suffix = changeme
 swift_hash_path_prefix = changeme
 
+# storage policies are defined here and determine various characterisitcs
+# about how objects are stored and treated.  Policies are specified by name
+# on a per container basis.  The policy index is specified in the section
+# header and is used internally.  Policy 0 is always used for legacy
+# containers and can be given a name for use in metadata hwoever the ring
+# file name will always be 'object' for backwards compatibility.  The name 
+# is optional for policy 0
+#[storage-policy:0]
+#name=chicken
+
+# this declares a policy called 'turkey' using repication by default, the
+# number of replicas will be determined by how the ring is built. In this
+# example the 'turkey' policy could have a lower or higher # of replicas
+# than storage policy 0. The ring filename will be based on 'object-1'
+#[storage-policy:1]
+#name=trukey
+
+# the policy 'gravy' specifies erasure coding where the object is split into
+# chunks and stored accross N nodes where N is the total number of chunks
+# defined by the policy.  In the example below, each object will be broken
+# into 14 chunks (coded) however only any 10 of them are needed to decode
+# the object thus consuming less disk space than triple replication but
+# at the cost of some level of performance (amount depends on several things)
+# the ring file name root will be 'object-2' and 'gravy' will be the policy
+# name specified via header emtadata
+#[storage-policy:2]
+#name=gravy
+#ec-scheme=14:10
+
 
 # The swift-constraints section sets the basic constraints on data
 # saved in the swift cluster.

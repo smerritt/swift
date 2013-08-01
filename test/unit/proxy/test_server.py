@@ -45,7 +45,8 @@ from swift.common.constraints import MAX_META_NAME_LENGTH, \
     MAX_META_VALUE_LENGTH, MAX_META_COUNT, MAX_META_OVERALL_SIZE, \
     MAX_FILE_SIZE, MAX_ACCOUNT_NAME_LENGTH, MAX_CONTAINER_NAME_LENGTH
 from swift.common import utils
-from swift.common.utils import mkdirs, normalize_timestamp, NullLogger
+from swift.common.utils import mkdirs, normalize_timestamp, NullLogger, \
+    StoragePolicy, StoragePolicyCollection
 from swift.common.wsgi import monkey_patch_mimetools
 from swift.proxy.controllers.obj import SegmentedIterable
 from swift.proxy.controllers.base import get_container_memcache_key, \
@@ -138,7 +139,32 @@ def setup():
                      {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
                       'port': obj2lis.getsockname()[1]}], 30),
                     f)
-    prosrv = proxy_server.Application(conf, FakeMemcacheReturnsNone())
+    with closing(GzipFile(os.path.join(_testdir, 'object-1.ring.gz'), 'wb')) \
+            as f:
+        pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
+                    [{'id': 0, 'zone': 0, 'device': 'sda1', 'ip': '127.0.0.1',
+                      'port': obj1lis.getsockname()[1]},
+                     {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
+                      'port': obj2lis.getsockname()[1]}], 30),
+                    f)
+    with closing(GzipFile(os.path.join(_testdir, 'object-2.ring.gz'), 'wb')) \
+             as f:
+        pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
+                    [{'id': 0, 'zone': 0, 'device': 'sda1', 'ip': '127.0.0.1',
+                      'port': con1lis.getsockname()[1]},
+                     {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
+                      'port': con2lis.getsockname()[1]}], 30),
+                    f)
+    """
+    here we're signaling the Application to create rings per our test specification
+    by passing in two policies, the first one is just a flag so Application knows
+    that this is a unit test case
+    """
+    policy = [StoragePolicy('1', 'unit-test', '', False), \
+        StoragePolicy('0', '', '', 'yes')]
+    policy_coll = StoragePolicyCollection(policy)
+    prosrv = proxy_server.Application(conf, FakeMemcacheReturnsNone(),
+                                      stor_policies=policy_coll)
     acc1srv = account_server.AccountController(conf)
     acc2srv = account_server.AccountController(conf)
     con1srv = container_server.ContainerController(conf)
@@ -243,11 +269,12 @@ class TestController(unittest.TestCase):
         self.account_ring = FakeRing()
         self.container_ring = FakeRing()
         self.memcache = FakeMemcache()
-
+        policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         app = proxy_server.Application(None, self.memcache,
                                        account_ring=self.account_ring,
                                        container_ring=self.container_ring,
-                                       object_ring=FakeRing())
+                                       stor_policies=policy_coll)
         self.controller = swift.proxy.controllers.Controller(app)
 
         class FakeReq(object):
@@ -508,29 +535,35 @@ class TestProxyServer(unittest.TestCase):
             def get_controller(self, path):
                 raise Exception('this shouldnt be caught')
 
+        policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         app = MyApp(None, FakeMemcache(), account_ring=FakeRing(),
-                    container_ring=FakeRing(), object_ring=FakeRing())
+                    container_ring=FakeRing(), stor_policies=policy_coll)
         req = Request.blank('/account', environ={'REQUEST_METHOD': 'HEAD'})
         app.update_request(req)
         resp = app.handle_request(req)
         self.assertEquals(resp.status_int, 500)
 
     def test_internal_method_request(self):
+        policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         baseapp = proxy_server.Application({},
                                            FakeMemcache(),
                                            container_ring=FakeRing(),
-                                           object_ring=FakeRing(),
+                                           stor_policies=policy_coll,
                                            account_ring=FakeRing())
         resp = baseapp.handle_request(
             Request.blank('/v1/a', environ={'REQUEST_METHOD': '__init__'}))
         self.assertEquals(resp.status, '405 Method Not Allowed')
 
     def test_inexistent_method_request(self):
+        policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         baseapp = proxy_server.Application({},
                                            FakeMemcache(),
                                            container_ring=FakeRing(),
                                            account_ring=FakeRing(),
-                                           object_ring=FakeRing())
+                                           stor_policies=policy_coll)
         resp = baseapp.handle_request(
             Request.blank('/v1/a', environ={'REQUEST_METHOD': '!invalid'}))
         self.assertEquals(resp.status, '405 Method Not Allowed')
@@ -542,10 +575,12 @@ class TestProxyServer(unittest.TestCase):
             called[0] = True
         with save_globals():
             set_http_connect(200)
+            policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+            policy_coll = StoragePolicyCollection(policy)
             app = proxy_server.Application(None, FakeMemcache(),
                                            account_ring=FakeRing(),
                                            container_ring=FakeRing(),
-                                           object_ring=FakeRing())
+                                           stor_policies=policy_coll)
             req = Request.blank('/v1/a')
             req.environ['swift.authorize'] = authorize
             app.update_request(req)
@@ -558,10 +593,12 @@ class TestProxyServer(unittest.TestCase):
         def authorize(req):
             called[0] = True
             return HTTPUnauthorized(request=req)
+        policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         app = proxy_server.Application(None, FakeMemcache(),
                                        account_ring=FakeRing(),
                                        container_ring=FakeRing(),
-                                       object_ring=FakeRing())
+                                       stor_policies=policy_coll)
         req = Request.blank('/v1/a')
         req.environ['swift.authorize'] = authorize
         app.update_request(req)
@@ -571,10 +608,12 @@ class TestProxyServer(unittest.TestCase):
     def test_negative_content_length(self):
         swift_dir = mkdtemp()
         try:
+            policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+            policy_coll = StoragePolicyCollection(policy)
             baseapp = proxy_server.Application({'swift_dir': swift_dir},
                                                FakeMemcache(), FakeLogger(),
                                                FakeRing(), FakeRing(),
-                                               FakeRing())
+                                               stor_policies=policy_coll)
             resp = baseapp.handle_request(
                 Request.blank('/', environ={'CONTENT_LENGTH': '-1'}))
             self.assertEquals(resp.status, '400 Bad Request')
@@ -589,12 +628,14 @@ class TestProxyServer(unittest.TestCase):
     def test_denied_host_header(self):
         swift_dir = mkdtemp()
         try:
+            policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+            policy_coll = StoragePolicyCollection(policy)
             baseapp = proxy_server.Application({'swift_dir': swift_dir,
                                                 'deny_host_headers':
                                                 'invalid_host.com'},
                                                FakeMemcache(), FakeLogger(),
                                                FakeRing(), FakeRing(),
-                                               FakeRing())
+                                               stor_policies=policy_coll)
             resp = baseapp.handle_request(
                 Request.blank('/v1/a/c/o',
                               environ={'HTTP_HOST': 'invalid_host.com'}))
@@ -603,10 +644,12 @@ class TestProxyServer(unittest.TestCase):
             rmtree(swift_dir, ignore_errors=True)
 
     def test_node_timing(self):
+        policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         baseapp = proxy_server.Application({'sorting_method': 'timing'},
                                            FakeMemcache(),
                                            container_ring=FakeRing(),
-                                           object_ring=FakeRing(),
+                                           stor_policies=policy_coll,
                                            account_ring=FakeRing())
         self.assertEquals(baseapp.node_timings, {})
 
@@ -631,11 +674,13 @@ class TestProxyServer(unittest.TestCase):
         self.assertEquals(res, exp_sorting)
 
     def test_node_affinity(self):
+        policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         baseapp = proxy_server.Application({'sorting_method': 'affinity',
                                             'read_affinity': 'r1=1'},
                                            FakeMemcache(),
                                            container_ring=FakeRing(),
-                                           object_ring=FakeRing(),
+                                           stor_policies=policy_coll,
                                            account_ring=FakeRing())
 
         nodes = [{'region': 2, 'zone': 1, 'ip': '127.0.0.1'},
@@ -650,16 +695,19 @@ class TestProxyServer(unittest.TestCase):
 class TestObjectController(unittest.TestCase):
 
     def setUp(self):
+        policy = [StoragePolicy('0', 'apple', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         self.app = proxy_server.Application(None, FakeMemcache(),
                                             account_ring=FakeRing(),
                                             container_ring=FakeRing(),
-                                            object_ring=FakeRing())
+                                            stor_policies=policy_coll)
         monkey_patch_mimetools()
 
     def tearDown(self):
         self.app.account_ring.set_replicas(3)
         self.app.container_ring.set_replicas(3)
-        self.app.object_ring.set_replicas(3)
+        object_ring = self.app.get_object_ring('')
+        object_ring.set_replicas(3)
 
     def assert_status_map(self, method, statuses, expected, raise_exc=False):
         with save_globals():
@@ -785,7 +833,8 @@ class TestObjectController(unittest.TestCase):
             def is_r0(node):
                 return node['region'] == 0
 
-            self.app.object_ring.max_more_nodes = 100
+            object_ring = self.app.get_object_ring('')
+            object_ring.max_more_nodes = 100
             self.app.write_affinity_is_local_fn = is_r0
             self.app.write_affinity_node_count = lambda r: 3
 
@@ -819,14 +868,15 @@ class TestObjectController(unittest.TestCase):
             def is_r0(node):
                 return node['region'] == 0
 
-            self.app.object_ring.max_more_nodes = 100
+            object_ring = self.app.get_object_ring('')
+            object_ring.max_more_nodes = 100
             self.app.write_affinity_is_local_fn = is_r0
             self.app.write_affinity_node_count = lambda r: 3
 
             controller = \
                 proxy_server.ObjectController(self.app, 'a', 'c', 'o.jpg')
             controller.error_limit(
-                self.app.object_ring.get_part_nodes(1)[0], 'test')
+                object_ring.get_part_nodes(1)[0], 'test')
             set_http_connect(200, 200,       # account, container
                              201, 201, 201,  # 3 working backends
                              give_connect=test_connect)
@@ -1629,10 +1679,12 @@ class TestObjectController(unittest.TestCase):
         try:
             with open(os.path.join(swift_dir, 'mime.types'), 'w') as fp:
                 fp.write('foo/bar foo\n')
+            policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+            policy_coll = StoragePolicyCollection(policy)
             proxy_server.Application({'swift_dir': swift_dir},
                                      FakeMemcache(), FakeLogger(),
                                      FakeRing(), FakeRing(),
-                                     FakeRing())
+                                     stor_policies=policy_coll)
             self.assertEquals(proxy_server.mimetypes.guess_type('blah.foo')[0],
                               'foo/bar')
             self.assertEquals(proxy_server.mimetypes.guess_type('blah.jpg')[0],
@@ -2093,8 +2145,9 @@ class TestObjectController(unittest.TestCase):
             for dev in self.app.container_ring.devs.values():
                 dev['ip'] = '127.0.0.1'
                 dev['port'] = 1
-            self.app.object_ring.get_nodes('account')
-            for dev in self.app.object_ring.devs.values():
+            object_ring = self.app.get_object_ring('')
+            object_ring.get_nodes('account')
+            for dev in object_ring.devs.values():
                 dev['ip'] = '127.0.0.1'
                 dev['port'] = 1
 
@@ -2144,8 +2197,9 @@ class TestObjectController(unittest.TestCase):
             for dev in self.app.container_ring.devs.values():
                 dev['ip'] = '127.0.0.1'
                 dev['port'] = 1
-            self.app.object_ring.get_nodes('account')
-            for dev in self.app.object_ring.devs.values():
+            object_ring = self.app.get_object_ring('')
+            object_ring.get_nodes('account')
+            for dev in object_ring.devs.values():
                 dev['ip'] = '127.0.0.1'
                 dev['port'] = 1
 
@@ -2180,8 +2234,9 @@ class TestObjectController(unittest.TestCase):
             for dev in self.app.container_ring.devs.values():
                 dev['ip'] = '127.0.0.1'
                 dev['port'] = 1
-            self.app.object_ring.get_nodes('account')
-            for dev in self.app.object_ring.devs.values():
+            object_ring = self.app.get_object_ring('')
+            object_ring.get_nodes('account')
+            for dev in object_ring.devs.values():
                 dev['ip'] = '127.0.0.1'
                 dev['port'] = 1
             req = Request.blank('/a/c/o', environ={'REQUEST_METHOD': 'GET'})
@@ -2217,8 +2272,9 @@ class TestObjectController(unittest.TestCase):
             for dev in self.app.container_ring.devs.values():
                 dev['ip'] = '127.0.0.1'
                 dev['port'] = 1
-            self.app.object_ring.get_nodes('account')
-            for dev in self.app.object_ring.devs.values():
+            object_ring = self.app.get_object_ring('')
+            object_ring.get_nodes('account')
+            for dev in object_ring.devs.values():
                 dev['ip'] = '127.0.0.1'
                 dev['port'] = 1
             req = Request.blank('/a/c/o',
@@ -2246,44 +2302,45 @@ class TestObjectController(unittest.TestCase):
     def test_iter_nodes(self):
         with save_globals():
             try:
-                self.app.object_ring.max_more_nodes = 2
+                object_ring = self.app.get_object_ring('')
+                object_ring.max_more_nodes = 2
                 controller = proxy_server.ObjectController(self.app, 'account',
                                                            'container',
                                                            'object')
-                partition, nodes = self.app.object_ring.get_nodes('account',
+                partition, nodes = object_ring.get_nodes('account',
                                                                   'container',
                                                                   'object')
                 collected_nodes = []
-                for node in controller.iter_nodes(self.app.object_ring,
+                for node in controller.iter_nodes(object_ring,
                                                   partition):
                     collected_nodes.append(node)
                 self.assertEquals(len(collected_nodes), 5)
 
-                self.app.object_ring.max_more_nodes = 20
+                object_ring.max_more_nodes = 20
                 self.app.request_node_count = lambda r: 20
                 controller = proxy_server.ObjectController(self.app, 'account',
                                                            'container',
                                                            'object')
-                partition, nodes = self.app.object_ring.get_nodes('account',
-                                                                  'container',
-                                                                  'object')
+                partition, nodes = object_ring.get_nodes('account',
+                                                         'container',
+                                                         'object')
                 collected_nodes = []
-                for node in controller.iter_nodes(self.app.object_ring,
+                for node in controller.iter_nodes(object_ring,
                                                   partition):
                     collected_nodes.append(node)
                 self.assertEquals(len(collected_nodes), 9)
 
                 self.app.log_handoffs = True
                 self.app.logger = FakeLogger()
-                self.app.object_ring.max_more_nodes = 2
+                object_ring.max_more_nodes = 2
                 controller = proxy_server.ObjectController(self.app, 'account',
                                                            'container',
                                                            'object')
-                partition, nodes = self.app.object_ring.get_nodes('account',
-                                                                  'container',
-                                                                  'object')
+                partition, nodes = object_ring.get_nodes('account',
+                                                         'container',
+                                                         'object')
                 collected_nodes = []
-                for node in controller.iter_nodes(self.app.object_ring,
+                for node in controller.iter_nodes(object_ring,
                                                   partition):
                     collected_nodes.append(node)
                 self.assertEquals(len(collected_nodes), 5)
@@ -2294,51 +2351,54 @@ class TestObjectController(unittest.TestCase):
 
                 self.app.log_handoffs = False
                 self.app.logger = FakeLogger()
-                self.app.object_ring.max_more_nodes = 2
+                object_ring.max_more_nodes = 2
                 controller = proxy_server.ObjectController(self.app, 'account',
                                                            'container',
                                                            'object')
-                partition, nodes = self.app.object_ring.get_nodes('account',
-                                                                  'container',
-                                                                  'object')
+                partition, nodes = object_ring.get_nodes('account',
+                                                         'container',
+                                                         'object')
                 collected_nodes = []
-                for node in controller.iter_nodes(self.app.object_ring,
+                for node in controller.iter_nodes(object_ring,
                                                   partition):
                     collected_nodes.append(node)
                 self.assertEquals(len(collected_nodes), 5)
                 self.assertEquals(self.app.logger.log_dict['warning'], [])
             finally:
-                self.app.object_ring.max_more_nodes = 0
+                object_ring.max_more_nodes = 0
 
     def test_iter_nodes_calls_sort_nodes(self):
         with mock.patch.object(self.app, 'sort_nodes') as sort_nodes:
             controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
-            for node in controller.iter_nodes(self.app.object_ring, 0):
+            object_ring = self.app.get_object_ring('')
+            for node in controller.iter_nodes(object_ring, 0):
                 pass
             sort_nodes.assert_called_once_with(
-                self.app.object_ring.get_part_nodes(0))
+                object_ring.get_part_nodes(0))
 
     def test_iter_nodes_skips_error_limited(self):
         with mock.patch.object(self.app, 'sort_nodes', lambda n: n):
             controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
-            first_nodes = list(controller.iter_nodes(self.app.object_ring, 0))
-            second_nodes = list(controller.iter_nodes(self.app.object_ring, 0))
+            object_ring = self.app.get_object_ring('')
+            first_nodes = list(controller.iter_nodes(object_ring, 0))
+            second_nodes = list(controller.iter_nodes(object_ring, 0))
             self.assertTrue(first_nodes[0] in second_nodes)
 
             controller.error_limit(first_nodes[0], 'test')
-            second_nodes = list(controller.iter_nodes(self.app.object_ring, 0))
+            second_nodes = list(controller.iter_nodes(object_ring, 0))
             self.assertTrue(first_nodes[0] not in second_nodes)
 
     def test_iter_nodes_gives_extra_if_error_limited_inline(self):
+        object_ring = self.app.get_object_ring('')
         with nested(
                 mock.patch.object(self.app, 'sort_nodes', lambda n: n),
                 mock.patch.object(self.app, 'request_node_count',
                                   lambda r: 6),
-                mock.patch.object(self.app.object_ring, 'max_more_nodes', 99)):
+                mock.patch.object(object_ring, 'max_more_nodes', 99)):
             controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
-            first_nodes = list(controller.iter_nodes(self.app.object_ring, 0))
+            first_nodes = list(controller.iter_nodes(object_ring, 0))
             second_nodes = []
-            for node in controller.iter_nodes(self.app.object_ring, 0):
+            for node in controller.iter_nodes(object_ring, 0):
                 if not second_nodes:
                     controller.error_limit(node, 'test')
                 second_nodes.append(node)
@@ -2347,12 +2407,13 @@ class TestObjectController(unittest.TestCase):
 
     def test_iter_nodes_with_custom_node_iter(self):
         controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
+        object_ring = self.app.get_object_ring('')
         node_list = [dict(id=n) for n in xrange(10)]
         with nested(
                 mock.patch.object(self.app, 'sort_nodes', lambda n: n),
                 mock.patch.object(self.app, 'request_node_count',
                                   lambda r: 3)):
-            got_nodes = list(controller.iter_nodes(self.app.object_ring, 0,
+            got_nodes = list(controller.iter_nodes(object_ring, 0,
                                                    node_iter=iter(node_list)))
         self.assertEqual(node_list[:3], got_nodes)
 
@@ -2360,7 +2421,7 @@ class TestObjectController(unittest.TestCase):
                 mock.patch.object(self.app, 'sort_nodes', lambda n: n),
                 mock.patch.object(self.app, 'request_node_count',
                                   lambda r: 1000000)):
-            got_nodes = list(controller.iter_nodes(self.app.object_ring, 0,
+            got_nodes = list(controller.iter_nodes(object_ring, 0,
                                                    node_iter=iter(node_list)))
         self.assertEqual(node_list, got_nodes)
 
@@ -2426,18 +2487,19 @@ class TestObjectController(unittest.TestCase):
             controller = proxy_server.ObjectController(self.app, 'account',
                                                        'container', 'object')
             controller.app.sort_nodes = lambda l: l
+            object_ring = controller.app.get_object_ring('')
             self.assert_status_map(controller.HEAD, (200, 200, 503, 200, 200),
                                    200)
-            self.assertEquals(controller.app.object_ring.devs[0]['errors'], 2)
-            self.assert_('last_error' in controller.app.object_ring.devs[0])
+            self.assertEquals(object_ring.devs[0]['errors'], 2)
+            self.assert_('last_error' in object_ring.devs[0])
             for _junk in xrange(self.app.error_suppression_limit):
                 self.assert_status_map(controller.HEAD, (200, 200, 503, 503,
                                                          503), 503)
-            self.assertEquals(controller.app.object_ring.devs[0]['errors'],
+            self.assertEquals(object_ring.devs[0]['errors'],
                               self.app.error_suppression_limit + 1)
             self.assert_status_map(controller.HEAD, (200, 200, 200, 200, 200),
                                    503)
-            self.assert_('last_error' in controller.app.object_ring.devs[0])
+            self.assert_('last_error' in object_ring.devs[0])
             self.assert_status_map(controller.PUT, (200, 200, 200, 201, 201,
                                                     201), 503)
             self.assert_status_map(controller.POST,
@@ -4779,10 +4841,12 @@ class TestContainerController(unittest.TestCase):
     "Test swift.proxy_server.ContainerController"
 
     def setUp(self):
+        policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         self.app = proxy_server.Application(None, FakeMemcache(),
                                             account_ring=FakeRing(),
                                             container_ring=FakeRing(),
-                                            object_ring=FakeRing())
+                                            stor_policies=policy_coll)
 
     def test_transfer_headers(self):
         src_headers = {'x-remove-versions-location': 'x',
@@ -5671,10 +5735,12 @@ class TestContainerController(unittest.TestCase):
 class TestAccountController(unittest.TestCase):
 
     def setUp(self):
+        policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         self.app = proxy_server.Application(None, FakeMemcache(),
                                             account_ring=FakeRing(),
                                             container_ring=FakeRing(),
-                                            object_ring=FakeRing)
+                                            stor_policies=policy_coll)
 
     def assert_status_map(self, method, statuses, expected, env_expected=None):
         with save_globals():
@@ -6097,10 +6163,12 @@ class TestAccountControllerFakeGetResponse(unittest.TestCase):
     have to match the responses for empty accounts that really exist.
     """
     def setUp(self):
+        policy = [StoragePolicy('0', '', '', 'yes', FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         self.app = proxy_server.Application(None, FakeMemcache(),
                                             account_ring=FakeRing(),
                                             container_ring=FakeRing(),
-                                            object_ring=FakeRing)
+                                            stor_policies=policy_coll)
         self.app.memcache = FakeMemcacheReturnsNone()
         self.controller = proxy_server.AccountController(self.app, 'acc')
         self.controller.app.account_autocreate = True
@@ -6211,28 +6279,32 @@ class TestSegmentedIterable(unittest.TestCase):
     def test_load_next_segment_unexpected_error(self):
         # Iterator value isn't a dict
         self.assertRaises(Exception,
-                          SegmentedIterable(self.controller, None,
-                                            [None])._load_next_segment)
+                          SegmentedIterable(
+                              self.controller, None, [None],
+                              self.controller.object_ring).
+                                      _load_next_segment)
+
         self.assert_(self.controller.exception_args[0].startswith(
                      'ERROR: While processing manifest'))
 
     def test_load_next_segment_with_no_segments(self):
         self.assertRaises(StopIteration,
-                          SegmentedIterable(self.controller, 'lc',
-                                            [])._load_next_segment)
+                          SegmentedIterable(
+                              self.controller, 'lc', [],
+                              self.controller.object_ring)._load_next_segment)
 
     def test_load_next_segment_with_one_segment(self):
-        segit = SegmentedIterable(self.controller, 'lc', [{'name':
-                                  'o1'}])
+        segit = SegmentedIterable(self.controller, 'lc', [{'name':'o1'}],
+                                  self.controller.object_ring)
         segit._load_next_segment()
-        self.assertEquals(
-            self.controller.GETorHEAD_base_args[0][4], '/a/lc/o1')
+        self.assertEquals(self.controller.GETorHEAD_base_args[0][4], '/a/lc/o1')
         data = ''.join(segit.segment_iter)
         self.assertEquals(data, '1')
 
     def test_load_next_segment_with_two_segments(self):
         segit = SegmentedIterable(self.controller, 'lc', [{'name':
-                                  'o1'}, {'name': 'o2'}])
+                                  'o1'}, {'name': 'o2'}],
+                                  self.controller.object_ring)
         segit._load_next_segment()
         self.assertEquals(
             self.controller.GETorHEAD_base_args[-1][4], '/a/lc/o1')
@@ -6255,7 +6327,8 @@ class TestSegmentedIterable(unittest.TestCase):
             segit = SegmentedIterable(
                 self.controller, 'lc', [
                     {'name': 'o1'}, {'name': 'o2'}, {'name': 'o3'},
-                    {'name': 'o4'}, {'name': 'o5'}])
+                    {'name': 'o4'}, {'name': 'o5'}],
+                self.controller.object_ring)
 
             # rate_limit_after_segment == 3, so the first 3 segments should
             # invoke no sleeping.
@@ -6291,7 +6364,8 @@ class TestSegmentedIterable(unittest.TestCase):
                 self.controller, 'lc', [
                     {'name': 'o0', 'bytes': 5}, {'name': 'o1', 'bytes': 5},
                     {'name': 'o2', 'bytes': 1}, {'name': 'o3'}, {'name': 'o4'},
-                    {'name': 'o5'}, {'name': 'o6'}])
+                    {'name': 'o5'}, {'name': 'o6'}],
+                self.controller.object_ring)
 
             # this tests for a range request which skips over the whole first
             # segment, after that 3 segments will be read in because the
@@ -6322,7 +6396,8 @@ class TestSegmentedIterable(unittest.TestCase):
 
     def test_load_next_segment_with_two_segments_skip_first(self):
         segit = SegmentedIterable(self.controller, 'lc', [{'name':
-                                  'o1'}, {'name': 'o2'}])
+                                  'o1'}, {'name': 'o2'}],
+                                  self.controller.object_ring)
         segit.ratelimit_index = 0
         segit.listing.next()
         segit._load_next_segment()
@@ -6333,7 +6408,8 @@ class TestSegmentedIterable(unittest.TestCase):
     def test_load_next_segment_with_seek(self):
         segit = SegmentedIterable(self.controller, 'lc',
                                   [{'name': 'o1', 'bytes': 1},
-                                   {'name': 'o2', 'bytes': 2}])
+                                   {'name': 'o2', 'bytes': 2}],
+                                  self.controller.object_ring)
         segit.ratelimit_index = 0
         segit.listing.next()
         segit.seek = 1
@@ -6348,7 +6424,8 @@ class TestSegmentedIterable(unittest.TestCase):
         segit = SegmentedIterable(self.controller, 'lc',
                                   [{'name': 'o7', 'bytes': 7},
                                    {'name': 'o8', 'bytes': 8},
-                                   {'name': 'o9', 'bytes': 9}])
+                                   {'name': 'o9', 'bytes': 9}],
+                                  self.controller.object_ring)
 
         body = ''.join(segit.app_iter_range(10, 20))
         self.assertEqual('8888899999', body)
@@ -6373,7 +6450,10 @@ class TestSegmentedIterable(unittest.TestCase):
         self.controller.GETorHEAD_base = local_GETorHEAD_base
         self.assertRaises(Exception,
                           SegmentedIterable(self.controller, 'lc',
-                          [{'name': 'o1'}])._load_next_segment)
+                          [{'name': 'o1'}],
+                          self.controller.object_ring).
+                          _load_next_segment)
+
         self.assert_(self.controller.exception_args[0].startswith(
                      'ERROR: While processing manifest'))
         self.assertEquals(str(self.controller.exception_info[1]),
@@ -6382,23 +6462,26 @@ class TestSegmentedIterable(unittest.TestCase):
     def test_iter_unexpected_error(self):
         # Iterator value isn't a dict
         self.assertRaises(Exception, ''.join,
-                          SegmentedIterable(self.controller, None, [None]))
+                          SegmentedIterable(self.controller, None, [None],
+                                            self.controller.object_ring))
         self.assert_(self.controller.exception_args[0].startswith(
             'ERROR: While processing manifest'))
 
     def test_iter_with_no_segments(self):
-        segit = SegmentedIterable(self.controller, 'lc', [])
+        segit = SegmentedIterable(self.controller, 'lc', [],
+                                  self.controller.object_ring)
         self.assertEquals(''.join(segit), '')
 
     def test_iter_with_one_segment(self):
         segit = SegmentedIterable(self.controller, 'lc', [{'name':
-                                  'o1'}])
+                                  'o1'}], self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit), '1')
 
     def test_iter_with_two_segments(self):
         segit = SegmentedIterable(self.controller, 'lc', [{'name':
-                                  'o1'}, {'name': 'o2'}])
+                                  'o1'}, {'name': 'o2'}],
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit), '122')
 
@@ -6409,8 +6492,9 @@ class TestSegmentedIterable(unittest.TestCase):
 
         self.controller.GETorHEAD_base = local_GETorHEAD_base
         self.assertRaises(Exception, ''.join,
-                          SegmentedIterable(self.controller, 'lc', [{'name':
-                                                                    'o1'}]))
+                          SegmentedIterable(self.controller, 'lc',
+                              [{'name': 'o1'}],
+                              self.controller.object_ring))
         self.assert_(self.controller.exception_args[0].startswith(
                      'ERROR: While processing manifest'))
         self.assertEquals(str(self.controller.exception_info[1]),
@@ -6420,54 +6504,66 @@ class TestSegmentedIterable(unittest.TestCase):
         # Iterator value isn't a dict
         self.assertRaises(Exception,
                           SegmentedIterable(self.controller, None,
-                                            [None]).app_iter_range(None,
-                                                                   None).next)
+                              [None], self.controller.object_ring).
+                               app_iter_range(None,None).next)
         self.assert_(self.controller.exception_args[0].startswith(
             'ERROR: While processing manifest'))
 
     def test_app_iter_range_with_no_segments(self):
         self.assertEquals(''.join(SegmentedIterable(
-            self.controller, 'lc', []).app_iter_range(None, None)), '')
+            self.controller, 'lc', [],
+            self.controller.object_ring).app_iter_range(None, None)), '')
         self.assertEquals(''.join(SegmentedIterable(
-            self.controller, 'lc', []).app_iter_range(3, None)), '')
+            self.controller, 'lc', [],
+            self.controller.object_ring).app_iter_range(None, None)), '')
         self.assertEquals(''.join(SegmentedIterable(
-            self.controller, 'lc', []).app_iter_range(3, 5)), '')
+            self.controller, 'lc', [],
+            self.controller.object_ring).app_iter_range(None, None)), '')
         self.assertEquals(''.join(SegmentedIterable(
-            self.controller, 'lc', []).app_iter_range(None, 5)), '')
+            self.controller, 'lc', [],
+            self.controller.object_ring).app_iter_range(None, None)), '')
 
     def test_app_iter_range_with_one_segment(self):
         listing = [{'name': 'o1', 'bytes': 1}]
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(None, None)), '1')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         self.assertEquals(''.join(segit.app_iter_range(3, None)), '')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         self.assertEquals(''.join(segit.app_iter_range(3, 5)), '')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(None, 5)), '1')
 
     def test_app_iter_range_with_two_segments(self):
         listing = [{'name': 'o1', 'bytes': 1}, {'name': 'o2', 'bytes': 2}]
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(None, None)), '122')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(1, None)), '22')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(1, 5)), '22')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(None, 2)), '12')
 
@@ -6476,33 +6572,40 @@ class TestSegmentedIterable(unittest.TestCase):
                    {'name': 'o3', 'bytes': 3}, {'name': 'o4', 'bytes': 4},
                    {'name': 'o5', 'bytes': 5}]
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(None, None)),
                           '122333444455555')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(3, None)),
                           '333444455555')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(5, None)), '3444455555')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(None, 6)), '122333')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(None, 7)), '1223334')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(3, 7)), '3334')
 
-        segit = SegmentedIterable(self.controller, 'lc', listing)
+        segit = SegmentedIterable(self.controller, 'lc', listing,
+                                  self.controller.object_ring)
         segit.response = Stub()
         self.assertEquals(''.join(segit.app_iter_range(5, 7)), '34')
 

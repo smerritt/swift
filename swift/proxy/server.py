@@ -36,7 +36,7 @@ from eventlet import Timeout
 from swift.common.ring import Ring
 from swift.common.utils import cache_from_env, get_logger, \
     get_remote_client, split_path, config_true_value, generate_trans_id, \
-    affinity_key_function, affinity_locality_predicate
+    affinity_key_function, affinity_locality_predicate, get_storage_policies
 from swift.common.constraints import check_utf8
 from swift.proxy.controllers import AccountController, ObjectController, \
     ContainerController
@@ -49,7 +49,7 @@ class Application(object):
     """WSGI application for the proxy server."""
 
     def __init__(self, conf, memcache=None, logger=None, account_ring=None,
-                 container_ring=None, object_ring=None):
+                 container_ring=None, stor_policies=None):
         if conf is None:
             conf = {}
         if logger is None:
@@ -79,7 +79,22 @@ class Application(object):
             config_true_value(conf.get('object_post_as_copy', 'true'))
         self.resellers_conf = ConfigParser()
         self.resellers_conf.read(os.path.join(swift_dir, 'resellers.conf'))
-        self.object_ring = object_ring or Ring(swift_dir, ring_name='object')
+        """
+        self.policies is based off of the util.py get_storage_policies()
+        and completed here with an instantiated ring per policy.  For
+        regular operation the stor_policies partm is None, for unit test
+        it is either a single fake policy or a numer of test policies
+        """
+        if stor_policies is None or len(stor_policies) > 1:
+            pol_template = get_storage_policies(stor_policies)
+            for pol in pol_template.pols.keys():
+                pol_template.pols.get(pol).object_ring = \
+                    Ring(swift_dir,
+                         ring_name=pol_template.pols.get(pol).ring_name)
+            self.policies = pol_template
+        else:
+            self.policies = stor_policies
+
         self.container_ring = container_ring or Ring(swift_dir,
                                                      ring_name='container')
         self.account_ring = account_ring or Ring(swift_dir,
@@ -155,6 +170,34 @@ class Application(object):
         else:
             raise ValueError(
                 'Invalid write_affinity_node_count value: %r' % ''.join(value))
+        """Temp print for debug to remove after review"""
+        for pol in self.policies.pols.keys():
+            self.logger.info(_('*** debug: pol name = %s'),
+                             self.policies.pols.get(pol).name)
+            self.logger.info(_('*** debug: idx = %s'),
+                             self.policies.pols.get(pol).idx)
+            self.logger.info(_('*** debug: is_default = %s'),
+                             self.policies.pols.get(pol).is_default)
+            self.logger.info(_('*** debug: ec_scheme = %s'),
+                             self.policies.pols.get(pol).ec_scheme)
+            self.logger.info(_('*** debug: ring_name = %s'),
+                             self.policies.pols.get(pol).ring_name)
+            self.logger.info(_('*** debug: object_ring = %s'),
+                             self.policies.pols.get(pol).object_ring)
+
+    def get_object_ring(self, policy):
+        """
+        Get the ring object to use to handle a request based on its policy.
+
+        :policy: policy as defined in swift.conf
+        :returns: appropriate ring object
+
+        """
+        for pol in self.policies.pols.keys():
+            if self.policies.pols.get(pol).name == policy:
+                return self.policies.pols.get(pol).object_ring
+        """if no policy could be found, use the 0 policy"""
+        return self.policies.get_policy_0().object_ring
 
     def get_controller(self, path):
         """

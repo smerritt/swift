@@ -48,6 +48,8 @@ from swift.common.http import is_informational, is_success, is_redirection, \
     HTTP_INSUFFICIENT_STORAGE, HTTP_UNAUTHORIZED
 from swift.common.swob import Request, Response, HeaderKeyDict
 
+POLICY = 'X-Container-Storage-Policy'
+
 
 def update_headers(response, headers):
     """
@@ -138,6 +140,7 @@ def headers_to_container_info(headers, status_int=HTTP_OK):
         'object_count': headers.get('x-container-object-count'),
         'bytes': headers.get('x-container-bytes-used'),
         'versions': headers.get('x-versions-location'),
+        'storage_policy': headers.get(POLICY.lower()),
         'cors': {
             'allow_origin': headers.get(
                 'x-container-meta-access-control-allow-origin'),

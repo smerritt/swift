@@ -86,17 +86,155 @@ FALLOCATE_RESERVE = 0
 hash_conf = ConfigParser()
 HASH_PATH_SUFFIX = ''
 HASH_PATH_PREFIX = ''
-if hash_conf.read('/etc/swift/swift.conf'):
-    try:
-        HASH_PATH_SUFFIX = hash_conf.get('swift-hash',
-                                         'swift_hash_path_suffix')
-    except (NoSectionError, NoOptionError):
-        pass
-    try:
-        HASH_PATH_PREFIX = hash_conf.get('swift-hash',
-                                         'swift_hash_path_prefix')
-    except (NoSectionError, NoOptionError):
-        pass
+
+
+# Used when reading config values
+TRUE_VALUES = set(('true', '1', 'yes', 'on', 't', 'y'))
+
+
+def config_true_value(value):
+    """
+    Returns True if the value is either True or a string in TRUE_VALUES.
+    Returns False otherwise.
+    """
+    return value is True or \
+        (isinstance(value, basestring) and value.lower() in TRUE_VALUES)
+
+
+class StoragePolicy(object):
+    """
+    Represents a storage policy.
+    Not meant to be instantiated directly; use get_storage_policies().
+    """
+    def __init__(self, idx, name, ec_scheme='', is_default=False,
+                 object_ring=None):
+        self.name = name
+        self.idx = idx
+        self.is_default = is_default
+        if self.idx == '0':
+            ring_name = "object"
+        else:
+            ring_name = "object-" + self.idx
+        self.ring_name = ring_name
+        self.ec_scheme = ec_scheme
+        self.object_ring = object_ring
+
+
+class StoragePolicyCollection(object):
+    """
+    This class reppresents the collection of valid storage policies for
+    the cluster and instantiated when swift.conf is parsed; as policy
+    objects (StoragePolicy) are added to the collection it assures that
+    only one is specified as the default.  It also provides various
+    accessor functions for the rest of the code.  Note:
+    default:  means that the policy is used when creating a new container
+              and no policy was explicitly specified
+    0 policy: is the policy that is used when accessing a container where
+              no policy was identified in the container metadata
+    """
+    def __init__(self, pols):
+        self.pols = dict((pol.name, pol) for pol in pols)
+        defaults = [pol for pol in pols if pol.is_default]
+        if len(defaults) > 1:
+            msg = "Too many default storage policies: %s" % \
+                (", ".join((pol.name for pol in defaults)))
+            raise ValueError(msg)
+        self.default = defaults[0]
+
+    def __len__(self):
+        return len(self.pols)
+
+    def __getitem__(self, key):
+        return self.pols[key]
+
+    def get(self, key):
+        return self.pols.get(key)
+
+    def get_def_policy(self):
+        return self.default
+
+    def get_policy_0(self):
+        polciy_0 = [pol for pol in self.pols.keys()
+                    if self.pols.get(pol).idx == '0']
+        if len(polciy_0) == 0:
+            raise ValueError("Fatal: no policy 0 has been set")
+        return self.pols[polciy_0[0]]
+
+    def validate_policy(self, policy):
+        if policy in self.pols:
+            return True
+        else:
+            return False
+
+"""setup default policy collection for unit test code"""
+STOR_POLICIES = StoragePolicyCollection([StoragePolicy('0', '', '', 'yes')])
+
+
+def parse_storage_policies(conf):
+    """
+    Parse storage policies in swift.conf making sure the syntax is correct
+    and assuring that a "0 policy" will exist even if not specified and
+    also that a "default policy" will exist even if not specified
+    """
+    global STOR_POLICIES
+
+    STOR_POLICIES = []
+    policies = []
+    need_default = True
+    need_pol0 = True
+    for section in conf.sections():
+        section_policy = section.split(':')
+        if len(section_policy) > 1 and section_policy[0] == 'storage-policy':
+            if section_policy[1].isdigit() is True:
+                policy_idx = section_policy[1]
+                if policy_idx == '0':
+                    need_pol0 = False
+            else:
+                raise ValueError("Malformed storage policy %s" % section)
+            try:
+                is_default = conf.get(section, 'default')
+                need_default = False
+            except NoOptionError:
+                is_default = 'no'
+            try:
+                policy_name = conf.get(section, 'name')
+            except NoOptionError:
+                policy_name = ''
+            try:
+                ec_scheme = conf.get(section, 'ec-scheme')
+            except NoOptionError:
+                ec_scheme = ''
+
+            policies.append(StoragePolicy(
+                policy_idx,
+                policy_name,
+                ec_scheme=ec_scheme,
+                is_default=config_true_value(is_default)))
+
+    # If a 0 policy wasn't explicitly given, or nothing was
+    # provided, create the 0 policy now
+    if not policies or need_pol0:
+        policies.append(StoragePolicy('0', '', '', False))
+
+    # if nothing was specified as default for new containers,
+    # specify policy 0 now
+    if need_default:
+        for policy in policies:
+            if policy.idx == '0':
+                policy.is_default = 'yes'
+    return StoragePolicyCollection(policies)
+
+
+def get_storage_policies(policies=None):
+    global STOR_POLICIES
+    """unit test code will pass its policies in"""
+    if policies is None:
+        return STOR_POLICIES
+    else:
+        """remove test flag added by unit test code"""
+        del policies.pols['unit-test']
+        STOR_POLICIES = policies
+        return policies
 
 
 def backward(f, blocksize=4096):
@@ -131,19 +269,6 @@ def backward(f, blocksize=4096):
     yield last_row
 
 
-# Used when reading config values
-TRUE_VALUES = set(('true', '1', 'yes', 'on', 't', 'y'))
-
-
-def config_true_value(value):
-    """
-    Returns True if the value is either True or a string in TRUE_VALUES.
-    Returns False otherwise.
-    """
-    return value is True or \
-        (isinstance(value, basestring) and value.lower() in TRUE_VALUES)
-
-
 def config_auto_int_value(value, default):
     """
     Returns default if value is None or 'auto'.
@@ -165,6 +290,9 @@ def noop_libc_function(*args):
 
 
 def validate_configuration():
+    """
+    Error if we don't have all required options from swift.conf
+    """
     if not HASH_PATH_SUFFIX and not HASH_PATH_PREFIX:
         sys.exit("Error: [swift-hash]: both swift_hash_path_suffix "
                  "and swift_hash_path_prefix are missing "
@@ -2243,3 +2371,17 @@ def parse_content_type(content_type):
             value = m[1].strip()
             parm_list.append((key, value))
     return content_type, parm_list
+
+
+if hash_conf.read('/etc/swift/swift.conf'):
+    try:
+        HASH_PATH_SUFFIX = hash_conf.get('swift-hash',
+                                         'swift_hash_path_suffix')
+    except (NoSectionError, NoOptionError):
+        pass
+    try:
+        HASH_PATH_PREFIX = hash_conf.get('swift-hash',
+                                         'swift_hash_path_prefix')
+    except (NoSectionError, NoOptionError):
+        pass
+    STOR_POLICIES = parse_storage_policies(hash_conf)

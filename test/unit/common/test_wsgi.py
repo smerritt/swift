@@ -63,7 +63,20 @@ def _fake_rings(tmpdir):
                      {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
                       'port': 6020}], 30),
                     f)
-
+    with closing(GzipFile(os.path.join(tmpdir, 'object-1.ring.gz'), 'wb')) as f:
+        pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
+                    [{'id': 2, 'zone': 0, 'device': 'sdc1', 'ip': '127.0.0.1',
+                      'port': 6010},
+                     {'id': 3, 'zone': 1, 'device': 'sdd1', 'ip': '127.0.0.1',
+                      'port': 6020}], 30),
+                    f)
+    with closing(GzipFile(os.path.join(tmpdir, 'object-2.ring.gz'), 'wb')) as f:
+        pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
+                    [{'id': 4, 'zone': 0, 'device': 'sde1', 'ip': '127.0.0.1',
+                      'port': 6011},
+                     {'id': 5, 'zone': 1, 'device': 'sdf1', 'ip': '127.0.0.1',
+                      'port': 6021}], 30),
+                    f)
 
 class TestWSGI(unittest.TestCase):
     """ Tests for swift.common.wsgi """
