@@ -34,6 +34,7 @@ from swift.proxy.controllers.base import Controller, delay_denial, \
     cors_validation, clear_info_cache
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
     HTTPNotFound
+from swift.proxy.controllers.base import POLICY
 
 
 class ContainerController(Controller):
@@ -43,7 +44,7 @@ class ContainerController(Controller):
     # Ensure these are all lowercase
     pass_through_headers = ['x-container-read', 'x-container-write',
                             'x-container-sync-key', 'x-container-sync-to',
-                            'x-versions-location']
+                            'x-versions-location', POLICY.lower()]
 
     def __init__(self, app, account_name, container_name, **kwargs):
         Controller.__init__(self, app)

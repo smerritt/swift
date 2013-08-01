@@ -21,6 +21,7 @@ from swift.proxy.controllers.base import headers_to_container_info, \
     Controller
 from swift.common.swob import Request
 from swift.common.utils import split_path
+from swift.common.storage_policy import StoragePolicy, StoragePolicyCollection
 from test.unit import fake_http_connect, FakeRing, FakeMemcache
 from swift.proxy import server as proxy_server
 
@@ -66,10 +67,12 @@ class FakeCache(object):
 
 class TestFuncs(unittest.TestCase):
     def setUp(self):
+        policy = [StoragePolicy('0', '', True, FakeRing())]
+        policy_coll = StoragePolicyCollection(policy)
         self.app = proxy_server.Application(None, FakeMemcache(),
                                             account_ring=FakeRing(),
                                             container_ring=FakeRing(),
-                                            object_ring=FakeRing)
+                                            stor_policies=policy_coll)
 
     def test_GETorHEAD_base(self):
         base = Controller(self.app)

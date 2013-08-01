@@ -31,7 +31,9 @@ import swift.container
 from swift.container import server as container_server
 from swift.common.utils import normalize_timestamp, mkdirs, public, replication
 from test.unit import fake_http_connect
-
+from swift.common.storage_policy import StoragePolicy, \
+    StoragePolicyCollection, get_stor_pols
+from swift.proxy.controllers.base import POLICY, POLICY_INDEX
 
 @contextmanager
 def save_globals():
@@ -55,10 +57,51 @@ class TestContainerController(unittest.TestCase):
         mkdirs(os.path.join(self.testdir, 'sda1', 'tmp'))
         self.controller = container_server.ContainerController(
             {'devices': self.testdir, 'mount_check': 'false'})
+        policy = [StoragePolicy('unit-test', '', False),
+                  StoragePolicy('0', 'zero', False),
+                  StoragePolicy('1', 'one', True),
+                  StoragePolicy('2', 'two', False),
+                  StoragePolicy('3', 'three', False)]
+        self.policies = StoragePolicyCollection(policy)
+        """ unit test code needs to pass in hardcoded policies for testing """
+        get_stor_pols(self.policies)
 
     def tearDown(self):
         """ Tear down for testing swift.object_server.ObjectController """
         rmtree(os.path.dirname(self.testdir), ignore_errors=1)
+
+
+    def test_validate_policy_in_header(self):
+        #no policy is OK
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': '0'})
+        self.assert_(self.controller.validate_policy_in_header(req))
+
+        #bogus policy
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': '0', 'X-Storage_policy': 'nada'})
+        self.assert_(not self.controller.validate_policy_in_header(req))
+
+        #good policies
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': '', 'X-Storage_policy': 'zero'})
+        self.assert_(self.controller.validate_policy_in_header(req))
+        self.assertEquals
+
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': '', 'X-Storage_policy': 'one'})
+        self.assert_(self.controller.validate_policy_in_header(req))
+        self.assertEquals(req.headers.get(POLICY_INDEX), '1')
+
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': '', 'X-Storage_policy': 'two'})
+        self.assert_(self.controller.validate_policy_in_header(req))
+        self.assertEquals(req.headers.get(POLICY_INDEX), '2')
+
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': '', 'X-Storage_policy': 'three'})
+        self.assert_(self.controller.validate_policy_in_header(req))
+        self.assertEquals(req.headers.get(POLICY_INDEX), '3')
 
     def test_acl_container(self):
         # Ensure no acl by default
@@ -167,6 +210,176 @@ class TestContainerController(unittest.TestCase):
                      'X-Content-Type': 'text/plain', 'X-ETag': 'e'})
         resp = self.controller.PUT(req)
         self.assertEquals(resp.status_int, 404)
+
+    def test_PUT_good_policy_specified(self):
+        # Set metadata header
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'two'})
+        resp = self.controller.PUT(req)
+        self.assertEquals(resp.status_int, 201)
+
+        #now make sure we read it back
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '2')
+
+    def test_PUT_no_policy_specified(self):
+        # Set metadata header
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1)})
+        resp = self.controller.PUT(req)
+        self.assertEquals(resp.status_int, 201)
+
+        #now make sure the default was used (pol 1)
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '1')
+
+    def test_PUT_bad_policy_specified(self):
+        # Set metadata header
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'nada'})
+        resp = self.controller.PUT(req)
+        # make sure we get bad response
+        self.assertEquals(resp.status_int, 400)
+
+    def test_PUT_no_policy_change(self):
+        # Set metadata header
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'two'})
+        resp = self.controller.PUT(req)
+        self.assertEquals(resp.status_int, 201)
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 204)
+        # make sure we get the right index back
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '2')
+
+        #now try to update w/o chaning the policy
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'two'})
+        resp = self.controller.POST(req)
+        self.assertEquals(resp.status_int, 204)
+        # make sure we get the right index back
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 204)
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '2')
+
+    def test_PUT_bad_policy_change(self):
+        # Set metadata header
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'two'})
+        resp = self.controller.PUT(req)
+        self.assertEquals(resp.status_int, 201)
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 204)
+        # make sure we get the right index back
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '2')
+
+        #now try to change it and make sure we get a conflict
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'one'})
+        resp = self.controller.PUT(req)
+        self.assertEquals(resp.status_int, 409)
+
+    def test_POST_good_policy_specified(self):
+        # Set metadata header
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'three'})
+        resp = self.controller.PUT(req)
+        self.assertEquals(resp.status_int, 201)
+
+        #now make sure we read it back
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '3')
+
+    def test_POST_no_policy_specified(self):
+        # Set metadata header
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'two'})
+        resp = self.controller.PUT(req)
+        self.assertEquals(resp.status_int, 201)
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 204)
+        # make sure we get the right index back
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '2')
+
+        #now try to update w/o specifying the policy
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Timestamp': normalize_timestamp(1)})
+        resp = self.controller.POST(req)
+        self.assertEquals(resp.status_int, 204)
+        # make sure we get the right index back
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 204)
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '2')
+
+    def test_POST_bad_policy_specified(self):
+        # Set metadata header
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'nada'})
+        resp = self.controller.PUT(req)
+        # make sure we get bad response
+        self.assertEquals(resp.status_int, 400)
+
+    def test_POST_bad_policy_change(self):
+        # Set metadata header
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'two'})
+        resp = self.controller.PUT(req)
+        self.assertEquals(resp.status_int, 201)
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 204)
+        # make sure we get the right index back
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '2')
+
+        #now try to change it and make sure we get a conflict
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'one'})
+        resp = self.controller.POST(req)
+        self.assertEquals(resp.status_int, 409)
+
+    def test_POST_no_policy_change(self):
+        # Set metadata header
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'two'})
+        resp = self.controller.PUT(req)
+        self.assertEquals(resp.status_int, 201)
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 204)
+        # make sure we get the right index back
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '2')
+
+        #now try to update w/o changing the policy
+        req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     POLICY: 'two'})
+        resp = self.controller.POST(req)
+        self.assertEquals(resp.status_int, 204)
+        # make sure we get the right index back
+        req = Request.blank('/sda1/p/a/c')
+        resp = self.controller.GET(req)
+        self.assertEquals(resp.status_int, 204)
+        self.assertEquals(resp.headers.get(POLICY_INDEX), '2')
 
     def test_PUT_GET_metadata(self):
         # Set metadata header
