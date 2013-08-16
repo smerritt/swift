@@ -2234,6 +2234,15 @@ def _def_val(*args, **kwargs):
 _drive_mount_check = defaultdict(_def_val)
 
 
+def _clear_mount_check_cache():
+    """
+    Clears the cache. Used in tests so that tests for check_mount can
+    operate on clean caches. Should only be used in tests.
+    """
+    for key in _drive_mount_check.keys():
+        del _drive_mount_check[key]
+
+
 def _check_mount(root, drive):
     """
     Verify that the path to the drive is a mount point and mounted.  This
@@ -2251,18 +2260,20 @@ def _check_mount(root, drive):
     return ismount(path)
 
 
-def check_mount(root, drive):
+def check_mount(root, drive, force=False):
+
     """
     Verify that the path to the drive is a mount point and mounted.  This
     allows us to fast fail on drives that have been unmounted because of
     issues, and also prevents us for accidentally filling up the root
     partition.
 
-    The result is cached per drive and only checked once a second. For very
+    The result is cached per drive and only checked periodically. For very
     high request rates this can cut down the stat traffic significantly.
 
     :param root:  base path where the drives are mounted
     :param drive: drive name to be checked
+    :param force_chedk: ignore the cache; do the check (default False)
     :returns: True if it is a valid mounted drive, False otherwise
     """
     if CHECK_MOUNT_CACHE_TIME <= 0:
@@ -2270,7 +2281,7 @@ def check_mount(root, drive):
     else:
         curr_time = int(time.time())
         last_time, val = _drive_mount_check[drive]
-        if curr_time > last_time + CHECK_MOUNT_CACHE_TIME:
+        if (curr_time > last_time + CHECK_MOUNT_CACHE_TIME) or force:
             val = _check_mount(root, drive)
             _drive_mount_check[drive] = (curr_time, val)
     return val

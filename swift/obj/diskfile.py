@@ -350,8 +350,9 @@ class DiskFile(object):
                  logger, keep_data_fp=False, disk_chunk_size=65536,
                  bytes_per_sync=(512 * 1024 * 1024), iter_hook=None,
                  threadpool=None, obj_dir='objects', mount_check=False,
-                 disallowed_metadata_keys=None):
-        if mount_check and not check_mount(path, device):
+                 check_mount_force=False, disallowed_metadata_keys=None):
+        if mount_check and not check_mount(path, device,
+                                           force=check_mount_force):
             raise DiskFileDeviceUnavailable()
         self.disk_chunk_size = disk_chunk_size
         self.bytes_per_sync = bytes_per_sync

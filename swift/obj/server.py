@@ -308,7 +308,7 @@ class ObjectController(object):
                                   content_type='text/plain')
         try:
             disk_file = self._diskfile(device, partition, account, container,
-                                       obj)
+                                       obj, check_mount_force=True)
         except DiskFileDeviceUnavailable:
             return HTTPInsufficientStorage(drive=device, request=request)
         if disk_file.is_deleted() or disk_file.is_expired():
@@ -363,7 +363,7 @@ class ObjectController(object):
                                   content_type='text/plain')
         try:
             disk_file = self._diskfile(device, partition, account, container,
-                                       obj)
+                                       obj, check_mount_force=True)
         except DiskFileDeviceUnavailable:
             return HTTPInsufficientStorage(drive=device, request=request)
         old_delete_at = int(disk_file.metadata.get('X-Delete-At') or 0)
@@ -560,7 +560,7 @@ class ObjectController(object):
                                   content_type='text/plain')
         try:
             disk_file = self._diskfile(device, partition, account, container,
-                                       obj)
+                                       obj, check_mount_force=True)
         except DiskFileDeviceUnavailable:
             return HTTPInsufficientStorage(drive=device, request=request)
         if 'x-if-delete-at' in request.headers and \

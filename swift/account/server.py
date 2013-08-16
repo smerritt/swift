@@ -95,7 +95,8 @@ class AccountController(object):
         except ValueError, err:
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
-        if self.mount_check and not check_mount(self.root, drive):
+        if self.mount_check and not check_mount(self.root, drive,
+                                                force=True):
             return HTTPInsufficientStorage(drive=drive, request=req)
         if 'x-timestamp' not in req.headers or \
                 not check_float(req.headers['x-timestamp']):
@@ -117,7 +118,8 @@ class AccountController(object):
         except ValueError, err:
             return HTTPBadRequest(body=str(err), content_type='text/plain',
                                   request=req)
-        if self.mount_check and not check_mount(self.root, drive):
+        if self.mount_check and not check_mount(self.root, drive,
+                                                force=True):
             return HTTPInsufficientStorage(drive=drive, request=req)
         if container:   # put account container
             pending_timeout = None
@@ -290,7 +292,8 @@ class AccountController(object):
             return HTTPBadRequest(body='Missing or bad timestamp',
                                   request=req,
                                   content_type='text/plain')
-        if self.mount_check and not check_mount(self.root, drive):
+        if self.mount_check and not check_mount(self.root, drive,
+                                                force=True):
             return HTTPInsufficientStorage(drive=drive, request=req)
         broker = self._get_account_broker(drive, part, account)
         if broker.is_deleted():

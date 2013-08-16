@@ -190,7 +190,8 @@ class ContainerController(object):
                 not check_float(req.headers['x-timestamp']):
             return HTTPBadRequest(body='Missing timestamp', request=req,
                                   content_type='text/plain')
-        if self.mount_check and not check_mount(self.root, drive):
+        if self.mount_check and not check_mount(self.root, drive,
+                                                force=True):
             return HTTPInsufficientStorage(drive=drive, request=req)
         broker = self._get_container_broker(drive, part, account, container)
         if account.startswith(self.auto_create_account_prefix) and obj and \
@@ -240,7 +241,8 @@ class ContainerController(object):
                                    self.allowed_sync_hosts)
             if err:
                 return HTTPBadRequest(err)
-        if self.mount_check and not check_mount(self.root, drive):
+        if self.mount_check and not check_mount(self.root, drive,
+                                                force=True):
             return HTTPInsufficientStorage(drive=drive, request=req)
         timestamp = normalize_timestamp(req.headers['x-timestamp'])
         broker = self._get_container_broker(drive, part, account, container)
@@ -488,7 +490,8 @@ class ContainerController(object):
                                    self.allowed_sync_hosts)
             if err:
                 return HTTPBadRequest(err)
-        if self.mount_check and not check_mount(self.root, drive):
+        if self.mount_check and not check_mount(self.root, drive,
+                                                force=True):
             return HTTPInsufficientStorage(drive=drive, request=req)
         broker = self._get_container_broker(drive, part, account, container)
         if broker.is_deleted():
