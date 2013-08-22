@@ -154,11 +154,11 @@ class StoragePolicyCollection(object):
         return self.default
 
     def get_policy_0(self):
-        polciy_0 = [pol for pol in self.pols.keys()
+        policy_0 = [pol for pol in self.pols.keys()
                     if self.pols.get(pol).idx == '0']
-        if len(polciy_0) == 0:
+        if len(policy_0) == 0:
             raise ValueError("Fatal: no policy 0 has been set")
-        return self.pols[polciy_0[0]]
+        return self.pols[policy_0[0]]
 
     def validate_policy(self, policy):
         if policy in self.pols:
