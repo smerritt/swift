@@ -161,10 +161,8 @@ class StoragePolicyCollection(object):
         return self.pols[policy_0[0]]
 
     def validate_policy(self, policy):
-        if policy in self.pols:
-            return True
-        else:
-            return False
+        return policy in self.pols
+
 
 """setup default policy collection for unit test code"""
 STOR_POLICIES = StoragePolicyCollection([StoragePolicy('0', '', '', 'yes')])
