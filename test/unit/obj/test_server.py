@@ -223,6 +223,37 @@ class TestObjectController(unittest.TestCase):
                      "X-Object-Meta-3" in resp.headers)
         self.assertEquals(resp.headers['Content-Type'], 'application/x-test')
 
+    def test_POST_non_md5_hash(self):
+        timestamp = normalize_timestamp(time())
+        req = Request.blank(
+            '/sda1/p/a/c/to-get', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': timestamp,
+                     'X-Hash-Algorithm': 'sha1',
+                     'Content-Length': '10',
+                     'Content-Type': 'text/plain'})
+        req.body = "some stuff"
+
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 201)  # sanity check
+
+        timestamp = normalize_timestamp(time() + 1)
+        req = Request.blank(
+            '/sda1/p/a/c/to-get', environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Timestamp': timestamp,
+                     'X-Hash-Algorithm': 'sha1',
+                     'X-Object-Meta-Pudding': 'Tapioca'})
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 202)
+
+    def test_POST_bogus_hash_algorithm(self):
+        req = Request.blank(
+            '/sda1/p/a/c/o',
+            environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'fiddlybits'})
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 400)
+
     def test_POST_old_timestamp(self):
         ts = time()
         timestamp = normalize_timestamp(ts)
@@ -434,6 +465,39 @@ class TestObjectController(unittest.TestCase):
         self.assertEquals(req.headers['Content-Length'], '0')
         resp = req.get_response(self.object_controller)
         self.assertEquals(resp.status_int, 201)
+
+    def test_PUT_non_md5_hash(self):
+        timestamp = normalize_timestamp(time())
+        req = Request.blank(
+            '/sda1/p/a/c/sha-ed', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': timestamp,
+                     'X-Hash-Algorithm': 'sha1',
+                     'Content-Length': '15',
+                     'Content-Type': 'text/plain',
+                     'ETag': '96590a0dbcd4574126771d30cc8055cb'})
+        req.body = "Cheese, Gromit!"
+
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 201)
+
+        objfile = os.path.join(
+            self.testdir, 'sda1',
+            storage_directory(object_server.DATADIR, 'p',
+                              hash_path('a', 'c', 'sha-ed',
+                                        hash_algorithm='sha1')),
+            timestamp + '.data')
+        self.assert_(os.path.isfile(objfile))
+
+    def test_PUT_bogus_hash_algorithm(self):
+        req = Request.blank(
+            '/sda1/p/a/c/o',
+            environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'Content-Length': '0',
+                     'X-Hash-Algorithm': 'barnyard'})
+        req.body = ""
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 400)
 
     def test_PUT_common(self):
         timestamp = normalize_timestamp(time())
@@ -710,6 +774,35 @@ class TestObjectController(unittest.TestCase):
         resp = req.get_response(self.object_controller)
         self.assertEquals(resp.status_int, 404)
 
+    def test_HEAD_non_md5_hash(self):
+        timestamp = normalize_timestamp(time())
+        req = Request.blank(
+            '/sda1/p/a/c/objblah', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': timestamp,
+                     'X-Hash-Algorithm': 'sha1',
+                     'Content-Length': '0',
+                     'Content-Type': 'text/plain'})
+        req.body = ""
+
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 201)  # sanity check
+
+        req = Request.blank(
+            '/sda1/p/a/c/objblah', environ={'REQUEST_METHOD': 'HEAD'},
+            headers={'X-Timestamp': timestamp,
+                     'X-Hash-Algorithm': 'sha1'})
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 200)
+
+    def test_HEAD_bogus_hash_algorithm(self):
+        req = Request.blank(
+            '/sda1/p/a/c/o',
+            environ={'REQUEST_METHOD': 'HEAD'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'onramp'})
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 400)
+
     def test_HEAD_quarantine_zbyte(self):
         # Test swift.obj.server.ObjectController.GET
         timestamp = normalize_timestamp(time())
@@ -830,6 +923,36 @@ class TestObjectController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.object_controller)
         self.assertEquals(resp.status_int, 404)
+
+    def test_GET_non_md5_hash(self):
+        timestamp = normalize_timestamp(time())
+        req = Request.blank(
+            '/sda1/p/a/c/to-get', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': timestamp,
+                     'X-Hash-Algorithm': 'sha1',
+                     'Content-Length': '7',
+                     'Content-Type': 'text/plain'})
+        req.body = "got it!"
+
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 201)  # sanity check
+
+        req = Request.blank(
+            '/sda1/p/a/c/to-get', environ={'REQUEST_METHOD': 'GET'},
+            headers={'X-Timestamp': timestamp,
+                     'X-Hash-Algorithm': 'sha1'})
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 200)
+        self.assertEquals(resp.body, "got it!")
+
+    def test_GET_bogus_hash_algorithm(self):
+        req = Request.blank(
+            '/sda1/p/a/c/o',
+            environ={'REQUEST_METHOD': 'GET'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': '☃'})
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 400)
 
     def test_GET_if_match(self):
         req = Request.blank('/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
@@ -1210,6 +1333,36 @@ class TestObjectController(unittest.TestCase):
                               hash_path('a', 'c', 'o')),
             timestamp + '.ts')
         self.assert_(os.path.isfile(objfile))
+
+    def test_DELETE_non_md5_hash(self):
+        timestamp = normalize_timestamp(time())
+        req = Request.blank(
+            '/sda1/p/a/c/obj', environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': timestamp,
+                     'X-Hash-Algorithm': 'sha1',
+                     'Content-Length': '7',
+                     'Content-Type': 'text/plain'})
+        req.body = "got it!"
+
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 201)  # sanity check
+
+        timestamp = normalize_timestamp(time() + 1)
+        req = Request.blank(
+            '/sda1/p/a/c/obj', environ={'REQUEST_METHOD': 'DELETE'},
+            headers={'X-Timestamp': timestamp,
+                     'X-Hash-Algorithm': 'sha1'})
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 204)
+
+    def test_DELETE_bogus_hash_algorithm(self):
+        req = Request.blank(
+            '/sda1/p/a/c/o',
+            environ={'REQUEST_METHOD': 'DELETE'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'megabogus'})
+        resp = req.get_response(self.object_controller)
+        self.assertEquals(resp.status_int, 400)
 
     def test_DELETE_container_updates(self):
         # Test swift.obj.server.ObjectController.DELETE and container

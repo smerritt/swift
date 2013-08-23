@@ -27,7 +27,7 @@ from swift.account.backend import AccountBroker
 from swift.account.utils import account_listing_response
 from swift.common.db import DatabaseConnectionError, DatabaseAlreadyExists
 from swift.common.request_helpers import get_param, get_listing_content_type, \
-    split_and_validate_path
+    split_and_validate_path, get_hash_algorithm
 from swift.common.utils import get_logger, public, config_true_value, \
     json, timing_stats, replication
 from swift.common.ondisk import hash_path, normalize_timestamp, \
@@ -64,8 +64,9 @@ class AccountController(object):
         swift.common.db.DB_PREALLOCATION = \
             config_true_value(conf.get('db_preallocation', 'f'))
 
-    def _get_account_broker(self, drive, part, account, **kwargs):
-        hsh = hash_path(account)
+    def _get_account_broker(self, drive, part, account, hash_algorithm,
+                            **kwargs):
+        hsh = hash_path(account, hash_algorithm=hash_algorithm)
         db_dir = storage_directory(DATADIR, part, hsh)
         db_path = os.path.join(self.root, drive, db_dir, hsh + '.db')
         kwargs.setdefault('account', account)
@@ -97,7 +98,9 @@ class AccountController(object):
                 not check_float(req.headers['x-timestamp']):
             return HTTPBadRequest(body='Missing timestamp', request=req,
                                   content_type='text/plain')
-        broker = self._get_account_broker(drive, part, account)
+        broker = self._get_account_broker(
+            drive, part, account,
+            hash_algorithm=get_hash_algorithm(req))
         if broker.is_deleted():
             return self._deleted_response(broker, req, HTTPNotFound)
         broker.delete_db(req.headers['x-timestamp'])
@@ -114,8 +117,10 @@ class AccountController(object):
             pending_timeout = None
             if 'x-trans-id' in req.headers:
                 pending_timeout = 3
-            broker = self._get_account_broker(drive, part, account,
-                                              pending_timeout=pending_timeout)
+            broker = self._get_account_broker(
+                drive, part, account,
+                pending_timeout=pending_timeout,
+                hash_algorithm=get_hash_algorithm(req))
             if account.startswith(self.auto_create_account_prefix) and \
                     not os.path.exists(broker.db_file):
                 try:
@@ -136,7 +141,9 @@ class AccountController(object):
             else:
                 return HTTPCreated(request=req)
         else:   # put account
-            broker = self._get_account_broker(drive, part, account)
+            broker = self._get_account_broker(
+                drive, part, account,
+                hash_algorithm=get_hash_algorithm(req))
             timestamp = normalize_timestamp(req.headers['x-timestamp'])
             if not os.path.exists(broker.db_file):
                 try:
@@ -171,9 +178,10 @@ class AccountController(object):
         out_content_type = get_listing_content_type(req)
         if self.mount_check and not check_mount(self.root, drive):
             return HTTPInsufficientStorage(drive=drive, request=req)
-        broker = self._get_account_broker(drive, part, account,
-                                          pending_timeout=0.1,
-                                          stale_reads_ok=True)
+        broker = self._get_account_broker(
+            drive, part, account,
+            pending_timeout=0.1, stale_reads_ok=True,
+            hash_algorithm=get_hash_algorithm(req))
         if broker.is_deleted():
             return self._deleted_response(broker, req, HTTPNotFound)
         info = broker.get_info()
@@ -213,9 +221,10 @@ class AccountController(object):
 
         if self.mount_check and not check_mount(self.root, drive):
             return HTTPInsufficientStorage(drive=drive, request=req)
-        broker = self._get_account_broker(drive, part, account,
-                                          pending_timeout=0.1,
-                                          stale_reads_ok=True)
+        broker = self._get_account_broker(
+            drive, part, account,
+            pending_timeout=0.1, stale_reads_ok=True,
+            hash_algorithm=get_hash_algorithm(req))
         if broker.is_deleted():
             return self._deleted_response(broker, req, HTTPNotFound)
         return account_listing_response(account, req, out_content_type, broker,
@@ -254,7 +263,9 @@ class AccountController(object):
                                   content_type='text/plain')
         if self.mount_check and not check_mount(self.root, drive):
             return HTTPInsufficientStorage(drive=drive, request=req)
-        broker = self._get_account_broker(drive, part, account)
+        broker = self._get_account_broker(
+            drive, part, account,
+            hash_algorithm=get_hash_algorithm(req))
         if broker.is_deleted():
             return self._deleted_response(broker, req, HTTPNotFound)
         timestamp = normalize_timestamp(req.headers['x-timestamp'])

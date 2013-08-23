@@ -28,7 +28,7 @@ from time import time
 from swift.common import exceptions
 from swift.common.ring import RingBuilder
 from swift.common.ring.builder import MAX_BALANCE
-from swift.common.utils import lock_parent_directory
+from swift.common.utils import lock_parent_directory, get_hasher
 from swift.common.ring.utils import parse_search_value
 
 MAJOR_VERSION = 1
@@ -240,6 +240,7 @@ class Commands:
         """
 swift-ring-builder <builder_file> create <part_power> <replicas>
                                          <min_part_hours>
+                                         [--hash <hash algorithm>]
     Creates <builder_file> with 2^<part_power> partitions and <replicas>.
     <min_part_hours> is number of hours to restrict moving a partition more
     than once.
@@ -247,7 +248,35 @@ swift-ring-builder <builder_file> create <part_power> <replicas>
         if len(argv) < 6:
             print Commands.create.__doc__.strip()
             exit(EXIT_ERROR)
-        builder = RingBuilder(int(argv[3]), float(argv[4]), int(argv[5]))
+        try:
+            part_power = int(argv[3])
+        except ValueError:
+            print "ERROR: part_power '%s' is not a valid integer\n" % argv[3]
+            print Commands.create.__doc__.strip()
+            exit(EXIT_ERROR)
+        try:
+            replicas = float(argv[4])
+        except ValueError:
+            print "ERROR: replicas '%s' is not a valid number\n" % argv[4]
+            print Commands.create.__doc__.strip()
+            exit(EXIT_ERROR)
+        try:
+            min_part_hours = int(argv[5])
+        except ValueError:
+            print "ERROR: min_part_hours '%s' is not a valid integer\n" % argv[5]
+            print Commands.create.__doc__.strip()
+            exit(EXIT_ERROR)
+
+        hash_algorithm = 'md5'
+        if len(argv) == 8:
+            hash_algorithm = argv[7]
+        try:
+            get_hasher(hash_algorithm)
+        except ValueError as err:
+            print "ERROR: " + err.message
+
+        builder = RingBuilder(part_power, replicas, min_part_hours,
+                              hash_algorithm=hash_algorithm)
         backup_dir = pathjoin(dirname(argv[1]), 'backups')
         try:
             mkdir(backup_dir)

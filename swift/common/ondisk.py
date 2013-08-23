@@ -19,7 +19,7 @@ import os
 import sys
 import errno
 
-from hashlib import md5
+import hashlib
 from random import shuffle
 from ConfigParser import ConfigParser, NoSectionError, NoOptionError
 
@@ -52,7 +52,23 @@ def validate_configuration():
                  "from /etc/swift/swift.conf")
 
 
-def hash_path(account, container=None, object=None, raw_digest=False):
+def get_hasher(algorithm_name):
+    """
+    Convert hash function name to hash object
+
+    :param algorithm_name: algorithm name as str, e.g. "md5", "sha1"
+    :returns: hash-object constructor, e.g. hashlib.md5, hashlib.sha1
+    :raises: ValueError if algorithm not valid
+    """
+    if algorithm_name not in hashlib.algorithms:
+        valid_algo_str = ", ".join(hashlib.algorithms)
+        raise ValueError("Invalid hash algorithm %r; valid values are %s" %
+                         (algorithm_name, valid_algo_str))
+    return getattr(hashlib, algorithm_name)
+
+
+def hash_path(account, container=None, object=None, raw_digest=False,
+              hash_algorithm='md5'):
     """
     Get the canonical hash for an account/container/object
 
@@ -60,21 +76,23 @@ def hash_path(account, container=None, object=None, raw_digest=False):
     :param container: Container
     :param object: Object
     :param raw_digest: If True, return the raw version rather than a hex digest
+    :param hash_algorithm: name of the hashing algorithm to use, e.g. md5, sha1
     :returns: hash string
     """
     if object and not container:
         raise ValueError('container is required if object is provided')
+    hash_class = get_hasher(hash_algorithm)
     paths = [account]
     if container:
         paths.append(container)
     if object:
         paths.append(object)
     if raw_digest:
-        return md5(HASH_PATH_PREFIX + '/' + '/'.join(paths)
-                   + HASH_PATH_SUFFIX).digest()
+        return hash_class(HASH_PATH_PREFIX + '/' + '/'.join(paths)
+                         + HASH_PATH_SUFFIX).digest()
     else:
-        return md5(HASH_PATH_PREFIX + '/' + '/'.join(paths)
-                   + HASH_PATH_SUFFIX).hexdigest()
+        return hash_class(HASH_PATH_PREFIX + '/' + '/'.join(paths)
+                         + HASH_PATH_SUFFIX).hexdigest()
 
 
 def normalize_timestamp(timestamp):

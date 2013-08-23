@@ -841,3 +841,20 @@ class TestDiskFile(unittest.TestCase):
         df.close()
         log_lines = df.logger.get_lines_for_level('error')
         self.assert_('a very special error' in log_lines[-1])
+
+    def test_non_md5_hash(self):
+        df = diskfile.DiskFile(
+            self.testdir, 'sdj', '0', 'a', 'c', 'zoidberg', FakeLogger(),
+            hash_algorithm='sha256')
+        with df.create() as writer:
+            writer.write("bytes and bytes and bytes and bytes")
+            writer.put({'X-Timestamp': 1476965791})
+
+        right_hash = hash_path('a', 'c', 'zoidberg', hash_algorithm='sha256')
+        wrong_hash = hash_path('a', 'c', 'zoidberg', hash_algorithm='md5')
+        right_dir = os.path.join(
+            self.testdir, 'sdj', 'objects', '0', right_hash[-3:], right_hash)
+        wrong_dir = os.path.join(
+            self.testdir, 'sdj', 'objects', '0', wrong_hash[-3:], wrong_hash)
+        self.assertTrue(os.path.isdir(right_dir))
+        self.assertFalse(os.path.isdir(wrong_dir))

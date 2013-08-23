@@ -30,7 +30,7 @@ from swift.common.swob import Request, HeaderKeyDict
 import swift.container
 from swift.container import server as container_server
 from swift.common.utils import mkdirs, public, replication
-from swift.common.ondisk import normalize_timestamp
+from swift.common.ondisk import normalize_timestamp, hash_path
 from test.unit import fake_http_connect
 
 
@@ -137,6 +137,33 @@ class TestContainerController(unittest.TestCase):
         self.assertEquals(int(response.headers['x-container-bytes-used']), 42)
         self.assertEquals(int(response.headers['x-container-object-count']), 1)
 
+    def test_HEAD_sha384(self):
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'sha384'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)  # sanity check
+
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'HEAD'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'sha384'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(204, resp.status_int)
+        self.assert_('X-Container-Bytes-Used' in resp.headers)
+
+    def test_HEAD_bogus_hash_algorithm(self):
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'HEAD'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'bogosort'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 400)
+
     def test_HEAD_not_found(self):
         req = Request.blank('/sda1/p/a/c', environ={'REQUEST_METHOD': 'HEAD'})
         resp = req.get_response(self.controller)
@@ -183,6 +210,22 @@ class TestContainerController(unittest.TestCase):
             'HTTP_X_TIMESTAMP': '2'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 202)
+
+    def test_PUT_sha384(self):
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'sha384'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)
+
+        # make sure the on-disk filename is the right thing
+        db_hash = hash_path('a', 'c', hash_algorithm='sha384')
+        db_hash_suffix = db_hash[-3:]
+        db_filename = os.path.join(self.testdir, 'sda1', 'containers', 'p',
+                                   db_hash_suffix, db_hash, db_hash + ".db")
+        self.assert_(os.path.exists(db_filename))
 
     def test_PUT_obj_not_found(self):
         req = Request.blank(
@@ -363,6 +406,32 @@ class TestContainerController(unittest.TestCase):
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 400)
 
+    def test_POST_sha384(self):
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'sha384'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)  # sanity check
+
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'POST'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'sha384'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(204, resp.status_int)
+
+    def test_POST_bogus_hash_algorithm(self):
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'GET'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'topological-sort'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 400)
+
     def test_POST_after_DELETE_not_found(self):
         req = Request.blank('/sda1/p/a/c',
                             environ={'REQUEST_METHOD': 'PUT'},
@@ -415,7 +484,8 @@ class TestContainerController(unittest.TestCase):
                      'X-Account-Host': '127.0.0.1:0',
                      'X-Account-Partition': '123',
                      'X-Account-Device': 'sda1,sda2'})
-        broker = self.controller._get_container_broker('sda1', 'p', 'a', 'c')
+        broker = self.controller._get_container_broker(
+            'sda1', 'p', 'a', 'c', hash_algorithm='md5')
         resp = self.controller.account_update(req, 'a', 'c', broker)
         self.assertEquals(resp.status_int, 400)
 
@@ -528,7 +598,8 @@ class TestContainerController(unittest.TestCase):
                      'x-container-sync-to': 'http://127.0.0.1:12345/v1/a/c'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 201)
-        db = self.controller._get_container_broker('sda1', 'p', 'a', 'c')
+        db = self.controller._get_container_broker(
+            'sda1', 'p', 'a', 'c', hash_algorithm='md5')
         info = db.get_info()
         self.assertEquals(info['x_container_sync_point1'], -1)
         self.assertEquals(info['x_container_sync_point2'], -1)
@@ -543,7 +614,8 @@ class TestContainerController(unittest.TestCase):
                      'x-container-sync-to': 'http://127.0.0.1:12345/v1/a/c'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 202)
-        db = self.controller._get_container_broker('sda1', 'p', 'a', 'c')
+        db = self.controller._get_container_broker(
+            'sda1', 'p', 'a', 'c', hash_algorithm='md5')
         info = db.get_info()
         self.assertEquals(info['x_container_sync_point1'], 123)
         self.assertEquals(info['x_container_sync_point2'], 456)
@@ -554,7 +626,8 @@ class TestContainerController(unittest.TestCase):
                      'x-container-sync-to': 'http://127.0.0.1:12345/v1/a/c2'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 202)
-        db = self.controller._get_container_broker('sda1', 'p', 'a', 'c')
+        db = self.controller._get_container_broker(
+            'sda1', 'p', 'a', 'c', hash_algorithm='md5')
         info = db.get_info()
         self.assertEquals(info['x_container_sync_point1'], -1)
         self.assertEquals(info['x_container_sync_point2'], -1)
@@ -566,7 +639,8 @@ class TestContainerController(unittest.TestCase):
                      'x-container-sync-to': 'http://127.0.0.1:12345/v1/a/c'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 201)
-        db = self.controller._get_container_broker('sda1', 'p', 'a', 'c')
+        db = self.controller._get_container_broker(
+            'sda1', 'p', 'a', 'c', hash_algorithm='md5')
         info = db.get_info()
         self.assertEquals(info['x_container_sync_point1'], -1)
         self.assertEquals(info['x_container_sync_point2'], -1)
@@ -581,7 +655,8 @@ class TestContainerController(unittest.TestCase):
                      'x-container-sync-to': 'http://127.0.0.1:12345/v1/a/c'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 204)
-        db = self.controller._get_container_broker('sda1', 'p', 'a', 'c')
+        db = self.controller._get_container_broker(
+            'sda1', 'p', 'a', 'c', hash_algorithm='md5')
         info = db.get_info()
         self.assertEquals(info['x_container_sync_point1'], 123)
         self.assertEquals(info['x_container_sync_point2'], 456)
@@ -592,7 +667,8 @@ class TestContainerController(unittest.TestCase):
                      'x-container-sync-to': 'http://127.0.0.1:12345/v1/a/c2'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 204)
-        db = self.controller._get_container_broker('sda1', 'p', 'a', 'c')
+        db = self.controller._get_container_broker(
+            'sda1', 'p', 'a', 'c', hash_algorithm='md5')
         info = db.get_info()
         self.assertEquals(info['x_container_sync_point1'], -1)
         self.assertEquals(info['x_container_sync_point2'], -1)
@@ -613,6 +689,32 @@ class TestContainerController(unittest.TestCase):
             environ={'REQUEST_METHOD': 'GET'}, headers={'X-Timestamp': '3'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 404)
+
+    def test_DELETE_sha384(self):
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'sha384'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)  # sanity check
+
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'DELETE'},
+            headers={'X-Timestamp': normalize_timestamp(2),
+                     'X-Hash-Algorithm': 'sha384'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(204, resp.status_int)
+
+    def test_DELETE_bogus_hash_algorithm(self):
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'DELETE'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'just-return-f4e3aa37eb83'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 400)
 
     def test_DELETE_not_found(self):
         # Even if the container wasn't previously heard of, the container
@@ -785,6 +887,35 @@ class TestContainerController(unittest.TestCase):
             environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 412)
+
+
+    def test_GET_sha384(self):
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'sha384'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)  # sanity check
+
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'GET'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'sha384',
+                     'Accept': 'application/json;q=1.0'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(200, resp.status_int)
+        self.assertEquals("[]", resp.body)
+
+    def test_GET_bogus_hash_algorithm(self):
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'GET'},
+            headers={'X-Timestamp': normalize_timestamp(1),
+                     'X-Hash-Algorithm': 'shortest-path'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 400)
 
     def test_GET_json(self):
         # make a container

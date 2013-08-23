@@ -40,6 +40,7 @@ class TestRingData(unittest.TestCase):
         self.assertEquals(rd_expected._replica2part2dev_id,
                           rd_got._replica2part2dev_id)
         self.assertEquals(rd_expected.devs, rd_got.devs)
+        self.assertEquals(rd_expected._hash_algorithm, rd_got._hash_algorithm)
         self.assertEquals(rd_expected._part_shift, rd_got._part_shift)
 
     def test_attrs(self):
@@ -67,10 +68,20 @@ class TestRingData(unittest.TestCase):
         ring_fname = os.path.join(self.testdir, 'foo.ring.gz')
         rd = ring.RingData(
             [array.array('H', [0, 1, 0, 1]), array.array('H', [0, 1, 0, 1])],
-            [{'id': 0, 'zone': 0}, {'id': 1, 'zone': 1}], 30)
+            [{'id': 0, 'zone': 0}, {'id': 1, 'zone': 1}],
+            part_shift=30, hash_algorithm='sha256')
         rd.save(ring_fname)
         rd2 = ring.RingData.load(ring_fname)
         self.assert_ring_data_equal(rd, rd2)
+
+    def test_hash(self):
+        self.assertRaises(
+            ValueError,
+            ring.RingData,
+            [array.array('H', [0, 1, 0, 1]), array.array('H', [0, 1, 0, 1])],
+            [{'id': 0, 'zone': 0}, {'id': 1, 'zone': 1}],
+            30,
+            hash_algorithm='cornedbeef')
 
     def test_deterministic_serialization(self):
         """

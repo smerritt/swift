@@ -26,7 +26,7 @@ import threading as stdlib_threading
 import time
 import uuid
 import functools
-from random import random
+from random import random, shuffle
 from urllib import quote as _quote
 from contextlib import contextmanager, closing
 import ctypes

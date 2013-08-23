@@ -18,8 +18,9 @@
 from __future__ import with_statement
 from test.unit import temptree
 
+import contextlib
+import mock
 import os
-
 import unittest
 
 from swift.common import ondisk
@@ -27,10 +28,6 @@ from swift.common import ondisk
 
 class TestOndisk(unittest.TestCase):
     """Tests for swift.common.ondisk"""
-
-    def setUp(self):
-        ondisk.HASH_PATH_SUFFIX = 'endcap'
-        ondisk.HASH_PATH_PREFIX = 'startcap'
 
     def test_normalize_timestamp(self):
         # Test swift.common.ondisk.normalize_timestamp
@@ -88,17 +85,21 @@ class TestOndisk(unittest.TestCase):
                           'objects/1/DEF/ABCDEF')
 
     def test_hash_path(self):
-        _prefix = ondisk.HASH_PATH_PREFIX
-        ondisk.HASH_PATH_PREFIX = ''
-        # Yes, these tests are deliberately very fragile. We want to make sure
-        # that if someones changes the results hash_path produces, they know it
-        try:
+        with contextlib.nested(
+                mock.patch('swift.common.ondisk.HASH_PATH_PREFIX', ''),
+                mock.patch('swift.common.ondisk.HASH_PATH_SUFFIX', 'endcap')):
+            # Yes, these tests are deliberately very fragile. We want to make
+            # sure that if someones changes the results hash_path produces,
+            # they know it.
             self.assertEquals(ondisk.hash_path('a'),
                               '1c84525acb02107ea475dcd3d09c2c58')
             self.assertEquals(ondisk.hash_path('a', 'c'),
                               '33379ecb053aa5c9e356c68997cbb59e')
             self.assertEquals(ondisk.hash_path('a', 'c', 'o'),
                               '06fbf0b514e5199dfc4e00f42eb5ea83')
+            self.assertEquals(ondisk.hash_path('a', 'c', 'o',
+                                               hash_algorithm='sha1'),
+                              '6478acc36f065f8758beaa5ccb2cdff144e48619')
             self.assertEquals(
                 ondisk.hash_path('a', 'c', 'o', raw_digest=False),
                 '06fbf0b514e5199dfc4e00f42eb5ea83')
@@ -110,8 +111,6 @@ class TestOndisk(unittest.TestCase):
             self.assertEquals(
                 ondisk.hash_path('a', 'c', 'o', raw_digest=False),
                 '363f9b535bfb7d17a43a46a358afca0e')
-        finally:
-            ondisk.HASH_PATH_PREFIX = _prefix
 
 
 class TestAuditLocationGenerator(unittest.TestCase):

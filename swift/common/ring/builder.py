@@ -26,6 +26,7 @@ from time import time
 from swift.common import exceptions
 from swift.common.ring import RingData
 from swift.common.ring.utils import tiers_for_dev, build_tier_tree
+from swift.common.ondisk import get_hasher
 
 MAX_BALANCE = 999.99
 
@@ -46,7 +47,8 @@ class RingBuilder(object):
     :param min_part_hours: minimum number of hours between partition changes
     """
 
-    def __init__(self, part_power, replicas, min_part_hours):
+    def __init__(self, part_power, replicas, min_part_hours,
+                 hash_algorithm='md5'):
         if part_power > 32:
             raise ValueError("part_power must be at most 32 (was %d)"
                              % (part_power,))
@@ -57,6 +59,10 @@ class RingBuilder(object):
             raise ValueError("min_part_hours must be non-negative (was %d)"
                              % (min_part_hours,))
 
+        # will raise ValueError if invalid algorithm name
+        get_hasher(hash_algorithm)
+
+        self.hash_algorithm = hash_algorithm
         self.part_power = part_power
         self.replicas = replicas
         self.min_part_hours = min_part_hours
@@ -121,6 +127,7 @@ class RingBuilder(object):
             self.devs = builder.devs
             self.devs_changed = builder.devs_changed
             self.version = builder.version
+            self.hash_algorithm = builder.hash_algorithm
             self._replica2part2dev = builder._replica2part2dev
             self._last_part_moves_epoch = builder._last_part_moves_epoch
             self._last_part_moves = builder._last_part_moves
@@ -134,6 +141,7 @@ class RingBuilder(object):
             self.devs = builder['devs']
             self.devs_changed = builder['devs_changed']
             self.version = builder['version']
+            self.hash_algorithm = builder.get('hash_algorithm', 'md5')
             self._replica2part2dev = builder['_replica2part2dev']
             self._last_part_moves_epoch = builder['_last_part_moves_epoch']
             self._last_part_moves = builder['_last_part_moves']
@@ -160,6 +168,7 @@ class RingBuilder(object):
                 'devs': self.devs,
                 'devs_changed': self.devs_changed,
                 'version': self.version,
+                'hash_algorithm': self.hash_algorithm,
                 '_replica2part2dev': self._replica2part2dev,
                 '_last_part_moves_epoch': self._last_part_moves_epoch,
                 '_last_part_moves': self._last_part_moves,
@@ -222,12 +231,14 @@ class RingBuilder(object):
             # shift an unsigned int >I right to obtain the partition for the
             # int).
             if not self._replica2part2dev:
-                self._ring = RingData([], devs, 32 - self.part_power)
+                self._ring = RingData([], devs, 32 - self.part_power,
+                                      self.hash_algorithm)
             else:
                 self._ring = \
                     RingData([array('H', p2d) for p2d in
                               self._replica2part2dev],
-                             devs, 32 - self.part_power)
+                             devs, 32 - self.part_power,
+                             self.hash_algorithm)
         return self._ring
 
     def add_dev(self, dev):

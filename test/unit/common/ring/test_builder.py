@@ -47,6 +47,11 @@ class TestRingBuilder(unittest.TestCase):
         self.assertEquals(rb.devs_changed, False)
         self.assertEquals(rb.version, 0)
 
+    def test_bogus_hash_algorithm(self):
+        ring.RingBuilder(8, 3, 1, 'md5')  # passes by not crashing
+        self.assertRaises(ValueError, ring.RingBuilder,
+                          8, 3, 1, 'squirrel')
+
     def test_overlarge_part_powers(self):
         ring.RingBuilder(32, 3, 1)  # passes by not crashing
         self.assertRaises(ValueError, ring.RingBuilder, 33, 3, 1)

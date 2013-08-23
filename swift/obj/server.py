@@ -37,7 +37,8 @@ from swift.common.exceptions import ConnectionTimeout, DiskFileError, \
     DiskFileNotExist, DiskFileCollision, DiskFileNoSpace, \
     DiskFileDeviceUnavailable
 from swift.common.http import is_success
-from swift.common.request_helpers import split_and_validate_path
+from swift.common.request_helpers import split_and_validate_path, \
+    get_hash_algorithm
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPCreated, \
     HTTPInternalServerError, HTTPNoContent, HTTPNotFound, HTTPNotModified, \
     HTTPPreconditionFailed, HTTPRequestTimeout, HTTPUnprocessableEntity, \
@@ -295,8 +296,9 @@ class ObjectController(object):
             return HTTPBadRequest(body='X-Delete-At in past', request=request,
                                   content_type='text/plain')
         try:
-            disk_file = self._diskfile(device, partition, account, container,
-                                       obj)
+            disk_file = self._diskfile(
+                device, partition, account, container, obj,
+                hash_algorithm=get_hash_algorithm(request))
         except DiskFileDeviceUnavailable:
             return HTTPInsufficientStorage(drive=device, request=request)
         with disk_file.open():
@@ -353,8 +355,9 @@ class ObjectController(object):
             return HTTPBadRequest(body=str(e), request=request,
                                   content_type='text/plain')
         try:
-            disk_file = self._diskfile(device, partition, account, container,
-                                       obj)
+            disk_file = self._diskfile(
+                device, partition, account, container, obj,
+                hash_algorithm=get_hash_algorithm(request))
         except DiskFileDeviceUnavailable:
             return HTTPInsufficientStorage(drive=device, request=request)
         with disk_file.open():
@@ -434,8 +437,9 @@ class ObjectController(object):
         device, partition, account, container, obj = \
             split_and_validate_path(request, 5, 5, True)
         try:
-            disk_file = self._diskfile(device, partition, account, container,
-                                       obj, iter_hook=sleep)
+            disk_file = self._diskfile(
+                device, partition, account, container, obj,
+                iter_hook=sleep, hash_algorithm=get_hash_algorithm(request))
         except DiskFileDeviceUnavailable:
             return HTTPInsufficientStorage(drive=device, request=request)
         disk_file.open()
@@ -510,8 +514,9 @@ class ObjectController(object):
         device, partition, account, container, obj = \
             split_and_validate_path(request, 5, 5, True)
         try:
-            disk_file = self._diskfile(device, partition, account, container,
-                                       obj)
+            disk_file = self._diskfile(
+                device, partition, account, container, obj,
+                hash_algorithm=get_hash_algorithm(request))
         except DiskFileDeviceUnavailable:
             return HTTPInsufficientStorage(drive=device, request=request)
         with disk_file.open():
@@ -550,8 +555,9 @@ class ObjectController(object):
             return HTTPBadRequest(body='Missing timestamp', request=request,
                                   content_type='text/plain')
         try:
-            disk_file = self._diskfile(device, partition, account, container,
-                                       obj)
+            disk_file = self._diskfile(
+                device, partition, account, container, obj,
+                hash_algorithm=get_hash_algorithm(request))
         except DiskFileDeviceUnavailable:
             return HTTPInsufficientStorage(drive=device, request=request)
         with disk_file.open():

@@ -26,7 +26,7 @@ import xml.dom.minidom
 from swift.common.swob import Request
 from swift.account.server import AccountController, ACCOUNT_LISTING_LIMIT
 from swift.common.utils import replication, public
-from swift.common.ondisk import normalize_timestamp
+from swift.common.ondisk import normalize_timestamp, hash_path
 
 
 class TestAccountController(unittest.TestCase):
@@ -130,6 +130,41 @@ class TestAccountController(unittest.TestCase):
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 507)
 
+    def test_DELETE_different_hash_algorithm(self):
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'PUT'},
+                            headers={'X-Timestamp': normalize_timestamp(1),
+                                     'X-Hash-Algorithm': 'sha1'})
+        # create with sha1 works
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)
+
+        # can't delete w/different hash algorithm because the on-disk name's
+        # not the same
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'DELETE'},
+                            headers={'X-Timestamp': normalize_timestamp(2)})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 404)
+
+        # but when you send it the right algorithm (i.e. the one used in the
+        # PUT request), it finds the .db file and deletes it
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'DELETE'},
+                            headers={'X-Timestamp': normalize_timestamp(2),
+                                     'X-Hash-Algorithm': 'sha1'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 204)
+
+    def test_DELETE_bogus_hash(self):
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'DELETE'},
+                            headers={'X-Timestamp': normalize_timestamp(1),
+                                     'X-Hash-Algorithm': 'corned beef'})
+
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 400)
+
     def test_HEAD_not_found(self):
         # Test the case in which account does not exist (can be recreated)
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'HEAD'})
@@ -212,6 +247,31 @@ class TestAccountController(unittest.TestCase):
         self.assertEquals(resp.headers['x-account-object-count'], '4')
         self.assertEquals(resp.headers['x-account-bytes-used'], '6')
 
+    def test_HEAD_sha1(self):
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'PUT'},
+                            headers={'X-Timestamp': normalize_timestamp(1),
+                                     'X-Hash-Algorithm': 'sha1'})
+        # sanity check: creation works
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)
+
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'HEAD'},
+                            headers={'X-Timestamp': normalize_timestamp(2),
+                                     'X-Hash-Algorithm': 'sha1'})
+
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 204)
+        self.assert_('X-Account-Bytes-Used' in resp.headers)
+
+    def test_HEAD_invalid_hash(self):
+        req = Request.blank(
+            '/sda1/84/acc', environ={'REQUEST_METHOD': 'HEAD'},
+            headers={'X-Hash-Algorithm': 'corned beef'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 400)
+
     def test_HEAD_invalid_partition(self):
         req = Request.blank('/sda1/./a', environ={'REQUEST_METHOD': 'HEAD',
                                                   'HTTP_X_TIMESTAMP': '1'})
@@ -259,6 +319,30 @@ class TestAccountController(unittest.TestCase):
                                                   'HTTP_X_TIMESTAMP': '1'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 202)
+
+    def test_PUT_sha256(self):
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'PUT'},
+                            headers={'X-Timestamp': normalize_timestamp(1),
+                                     'X-Hash-Algorithm': 'sha256'})
+        db_hash = hash_path('a', hash_algorithm='sha256')
+        db_hash_suffix = db_hash[-3:]
+        db_filename = os.path.join(self.testdir, 'sda1', 'accounts', 'p',
+                                   db_hash_suffix, db_hash, db_hash + ".db")
+
+        # create with sha256 and the DB's filename is a sha256 hash.
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)
+        self.assert_(os.path.exists(db_filename))
+
+    def test_PUT_bogus_hash(self):
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'PUT'},
+                            headers={'X-Timestamp': normalize_timestamp(1),
+                                     'X-Hash-Algorithm': 'corned beef'})
+
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 400)
 
     def test_PUT_after_DELETE(self):
         req = Request.blank('/sda1/p/a', environ={'REQUEST_METHOD': 'PUT'},
@@ -397,6 +481,33 @@ class TestAccountController(unittest.TestCase):
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 204)
         self.assert_('x-account-meta-test' not in resp.headers)
+
+    def test_POST_sha1(self):
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'PUT'},
+                            headers={'X-Timestamp': normalize_timestamp(1),
+                                     'X-Hash-Algorithm': 'sha1'})
+        # sanity check: creation works
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)
+
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'POST'},
+                            headers={'X-Timestamp': normalize_timestamp(2),
+                                     'X-Hash-Algorithm': 'sha1',
+                                     'X-Account-Meta-Bert': 'Ernie'})
+
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 204)
+
+    def test_POST_invalid_hash(self):
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'POST'},
+                            headers={'X-Timestamp': normalize_timestamp(1),
+                                     'X-Hash-Algorithm': 'bork bork bork'})
+
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 400)
 
     def test_POST_invalid_partition(self):
         req = Request.blank('/sda1/./a', environ={'REQUEST_METHOD': 'POST',
@@ -1176,6 +1287,31 @@ class TestAccountController(unittest.TestCase):
                                                       'HTTP_X_TIMESTAMP': '1'})
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 507)
+
+    def test_GET_sha1(self):
+        req = Request.blank('/sda1/p/a',
+                            environ={'REQUEST_METHOD': 'PUT'},
+                            headers={'X-Timestamp': normalize_timestamp(1),
+                                     'X-Hash-Algorithm': 'sha1'})
+        # sanity check: creation works
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 201)
+
+        req = Request.blank('/sda1/p/a?format=json',
+                            environ={'REQUEST_METHOD': 'GET'},
+                            headers={'X-Timestamp': normalize_timestamp(2),
+                                     'X-Hash-Algorithm': 'sha1'})
+
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 200)
+        self.assertEquals(resp.body, "[]")
+
+    def test_GET_invalid_hash(self):
+        req = Request.blank(
+            '/sda1/4744830/acc', environ={'REQUEST_METHOD': 'GET'},
+            headers={'X-Hash-Algorithm': 'red flannel'})
+        resp = req.get_response(self.controller)
+        self.assertEquals(resp.status_int, 400)
 
     def test_through_call(self):
         inbuf = StringIO()

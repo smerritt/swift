@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import array
+import hashlib
 import cPickle as pickle
 from collections import defaultdict
 from gzip import GzipFile
@@ -22,21 +23,26 @@ import struct
 from time import time
 import os
 from io import BufferedReader
-from hashlib import md5
 from itertools import chain
 
 from swift.common.utils import json
-from swift.common.ondisk import hash_path, validate_configuration
+from swift.common.ondisk import get_hasher, hash_path, validate_configuration
 from swift.common.ring.utils import tiers_for_dev
 
 
 class RingData(object):
     """Partitioned consistent hashing ring data (used for serialization)."""
 
-    def __init__(self, replica2part2dev_id, devs, part_shift):
+    def __init__(self, replica2part2dev_id, devs, part_shift,
+                 hash_algorithm=None):
         self.devs = devs
         self._replica2part2dev_id = replica2part2dev_id
         self._part_shift = part_shift
+        # default of 'md5' is to handle migration of old rings
+        self._hash_algorithm = hash_algorithm or 'md5'
+
+        # fail fast: raise ValueError if algorithm is no good
+        get_hasher(self._hash_algorithm)
 
         for dev in self.devs:
             if dev is not None:
@@ -80,7 +86,8 @@ class RingData(object):
             ring_data = pickle.load(gz_file)
         if not hasattr(ring_data, 'devs'):
             ring_data = RingData(ring_data['replica2part2dev_id'],
-                                 ring_data['devs'], ring_data['part_shift'])
+                                 ring_data['devs'], ring_data['part_shift'],
+                                 ring_data.get('hash_algorithm'))
         return ring_data
 
     def serialize_v1(self, file_obj):
@@ -90,6 +97,7 @@ class RingData(object):
         json_encoder = json.JSONEncoder(sort_keys=True)
         json_text = json_encoder.encode(
             {'devs': ring['devs'], 'part_shift': ring['part_shift'],
+             'hash_algorithm': ring['hash_algorithm'],
              'replica_count': len(ring['replica2part2dev_id'])})
         json_len = len(json_text)
         file_obj.write(struct.pack('!I', json_len))
@@ -119,6 +127,7 @@ class RingData(object):
     def to_dict(self):
         return {'devs': self.devs,
                 'replica2part2dev_id': self._replica2part2dev_id,
+                'hash_algorithm': self._hash_algorithm,
                 'part_shift': self._part_shift}
 
 
@@ -159,6 +168,7 @@ class Ring(object):
                     if 'port' in dev:
                         dev.setdefault('replication_port', dev['port'])
 
+            self.hash_algorithm = ring_data._hash_algorithm
             self._replica2part2dev_id = ring_data._replica2part2dev_id
             self._part_shift = ring_data._part_shift
             self._rebuild_tier_data()
@@ -238,7 +248,8 @@ class Ring(object):
         :param obj: object name
         :returns: the partition number
         """
-        key = hash_path(account, container, obj, raw_digest=True)
+        key = hash_path(account, container, obj, raw_digest=True,
+                        hash_algorithm=self.hash_algorithm)
         if time() > self._rtime:
             self._reload()
         part = struct.unpack_from('>I', key)[0] >> self._part_shift
@@ -315,7 +326,7 @@ class Ring(object):
 
         parts = len(self._replica2part2dev_id[0])
         start = struct.unpack_from(
-            '>I', md5(str(part)).digest())[0] >> self._part_shift
+            '>I', hashlib.md5(str(part)).digest())[0] >> self._part_shift
         inc = int(parts / 65536) or 1
         # Multiple loops for execution speed; the checks and bookkeeping get
         # simpler as you go along
