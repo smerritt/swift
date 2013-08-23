@@ -48,7 +48,8 @@ from swift.common.http import is_informational, is_success, is_redirection, \
     HTTP_INSUFFICIENT_STORAGE, HTTP_UNAUTHORIZED
 from swift.common.swob import Request, Response, HeaderKeyDict
 
-POLICY = 'X-Container-Storage-Policy'
+POLICY = 'X-Storage-Policy'
+POLICY_INDEX = 'X-Storage-Policy-Index'
 
 
 def update_headers(response, headers):

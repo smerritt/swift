@@ -41,7 +41,7 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPConflict, \
     HTTPCreated, HTTPInternalServerError, HTTPNoContent, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPMethodNotAllowed, Request, Response, \
     HTTPInsufficientStorage, HTTPNotAcceptable, HTTPException, HeaderKeyDict
-from swift.proxy.controllers.base import POLICY
+from swift.proxy.controllers.base import POLICY, POLICY_INDEX
 
 DATADIR = 'containers'
 
@@ -261,6 +261,16 @@ class ContainerController(object):
                               req.headers['x-etag'])
             return HTTPCreated(request=req)
         else:   # put container
+            # Make sure the storage policy is valid before even thinking about
+            # creating a database.
+            storage_policy = req.headers.get(POLICY)
+            if (storage_policy is not None
+                    and not STOR_POLICIES.validate_policy(storage_policy)):
+                return HTTPBadRequest(
+                    request=req,
+                    content_type="text/plain",
+                    body=("Invalid X-Container-Storage-Policy %s" %
+                          storage_policy))
             if not os.path.exists(broker.db_file):
                 try:
                     broker.initialize(timestamp)
@@ -278,36 +288,31 @@ class ContainerController(object):
                 for key, value in req.headers.iteritems()
                 if key.lower() in self.save_headers or
                 key.lower().startswith('x-container-meta-'))
-            if metadata:
-                if POLICY in metadata:
-                    if not STOR_POLICIES.validate_policy(metadata[POLICY][0]):
-                        return HTTPBadRequest(request=req)
-                if created:
-                    """new container, req headers provided"""
-                    if POLICY not in metadata:
-                        add_default_policy = True
-                else:
-                    """existing container, req headers provided"""
-                    if POLICY in metadata and POLICY in broker.metadata:
-                        if metadata[POLICY][0] != broker.metadata[POLICY][0]:
-                            """ policy updates prohibited"""
-                            return HTTPConflict(request=req)
-                if 'X-Container-Sync-To' in metadata:
-                    if 'X-Container-Sync-To' not in broker.metadata or \
-                            metadata['X-Container-Sync-To'][0] != \
-                            broker.metadata['X-Container-Sync-To'][0]:
-                        broker.set_x_container_sync_points(-1, -1)
-            else:
-                """
-                if just created w/o metadata or if already exists but policy
-                is not in existiner broker (legacy container) then add default
-                """
-                if created or POLICY not in broker.metadata:
-                    add_default_policy = True
-            if add_default_policy:
-                metadata.update({POLICY:
-                                (STOR_POLICIES.get_def_policy().name,
-                                 timestamp)})
+
+
+            if POLICY in metadata:
+                requested_policy_index = STOR_POLICIES.policy_to_index(
+                    metadata[POLICY])
+                current_policy_index = broker.metadata.get(POLICY_INDEX,
+                                                           (None, None))[0]
+                if ((current_policy_index is not None) and
+                        (requested_policy_index != current_policy_index)):
+                    # Someone's trying to change a storage policy.
+                    # Bad client! No soup for you!
+                    return HTTPConflict(request=req)
+                elif created and POLICY_INDEX not in broker.metadata:
+                    metadata[POLICY_INDEX] = (requested_policy_index,
+                                              timestamp)
+            elif created:
+                metadata[POLICY_INDEX] = (STOR_POLICIES.get_def_policy().idx,
+                                          timestamp)
+
+            if 'X-Container-Sync-To' in metadata:
+                if 'X-Container-Sync-To' not in broker.metadata or \
+                        metadata['X-Container-Sync-To'][0] != \
+                        broker.metadata['X-Container-Sync-To'][0]:
+                    broker.set_x_container_sync_points(-1, -1)
+
             broker.update_metadata(metadata)
             resp = self.account_update(req, account, container, broker)
             if resp:
