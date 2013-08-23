@@ -85,7 +85,8 @@ class AccountController(Controller):
             return resp
         account_partition, accounts = \
             self.app.account_ring.get_nodes(self.account_name)
-        headers = self.generate_request_headers(req, transfer=True)
+        headers = self.generate_request_headers(
+            req, self.app.account_ring, transfer=True)
         clear_info_cache(self.app, req.environ, self.account_name)
         resp = self.make_requests(
             req, self.app.account_ring, account_partition, 'PUT',
@@ -105,7 +106,8 @@ class AccountController(Controller):
             return error_response
         account_partition, accounts = \
             self.app.account_ring.get_nodes(self.account_name)
-        headers = self.generate_request_headers(req, transfer=True)
+        headers = self.generate_request_headers(
+            req, self.app.account_ring, transfer=True)
         clear_info_cache(self.app, req.environ, self.account_name)
         resp = self.make_requests(
             req, self.app.account_ring, account_partition, 'POST',
@@ -131,7 +133,7 @@ class AccountController(Controller):
                 headers={'Allow': ', '.join(self.allowed_methods)})
         account_partition, accounts = \
             self.app.account_ring.get_nodes(self.account_name)
-        headers = self.generate_request_headers(req)
+        headers = self.generate_request_headers(req, self.app.account_ring)
         clear_info_cache(self.app, req.environ, self.account_name)
         resp = self.make_requests(
             req, self.app.account_ring, account_partition, 'DELETE',

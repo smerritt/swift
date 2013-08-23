@@ -22,7 +22,7 @@ from swob in here without creating circular imports.
 
 from swift.common.constraints import FORMAT2CONTENT_TYPE
 from swift.common.swob import HTTPBadRequest, HTTPNotAcceptable
-from swift.common.ondisk import validate_device_partition
+from swift.common.ondisk import validate_device_partition, get_hasher
 from swift.common.utils import split_path
 from urllib import unquote
 
@@ -88,3 +88,22 @@ def split_and_validate_path(request, minsegs=1, maxsegs=None,
     except ValueError as err:
         raise HTTPBadRequest(body=str(err), request=request,
                              content_type='text/plain')
+
+
+def get_hash_algorithm(request):
+    """
+    Gets and validates the hash algorithm from the request headers.
+    Defaults to md5 if algorithm not specified.
+
+    :param request: the request object
+    :returns: the name of the hash, e.g. 'md5' or 'sha384'
+    :raises: HTTPBadRequest if the hash name is invalid
+    """
+    algo_name = request.headers.get('X-Hash-Algorithm', 'md5')
+    try:
+        get_hasher(algo_name)
+        return algo_name
+    except ValueError:
+        raise HTTPBadRequest(
+            request=request, content_type='text/plain',
+            body='%s is not a valid hash algorithm' % algo_name)

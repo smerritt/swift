@@ -576,12 +576,13 @@ class Controller(object):
                            if k.lower() in self.pass_through_headers or
                            k.lower().startswith(x_meta))
 
-    def generate_request_headers(self, orig_req=None, additional=None,
-                                 transfer=False):
+    def generate_request_headers(self, orig_req=None, ring=None,
+                                 additional=None, transfer=False):
         """
-        Create a list of headers to be used in backend requets
+        Create a list of headers to be used in backend request
 
         :param orig_req: the original request sent by the client to the proxy
+        :param ring: the relevant ring
         :param additional: additional headers to send to the backend
         :param transfer: If True, transfer headers from original client request
         :returns: a dictionary of headers
@@ -592,6 +593,7 @@ class Controller(object):
         if transfer:
             self.transfer_headers(orig_req.headers, headers)
         headers.setdefault('x-timestamp', normalize_timestamp(time.time()))
+        headers.setdefault('x-hash-algorithm', ring.hash_algorithm)
         if orig_req:
             referer = orig_req.as_referer()
         else:
@@ -1049,7 +1051,8 @@ class Controller(object):
         source_headers = []
         sources = []
         newest = config_true_value(req.headers.get('x-newest', 'f'))
-        headers = self.generate_request_headers(req, additional=req.headers)
+        headers = self.generate_request_headers(req, ring,
+                                                additional=req.headers)
         for node in self.iter_nodes(ring, partition):
             start_node_timing = time.time()
             try:

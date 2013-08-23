@@ -774,7 +774,8 @@ class ObjectController(Controller):
                           container_partition, containers,
                           delete_at_container=None, delete_at_partition=None,
                           delete_at_nodes=None):
-        headers = [self.generate_request_headers(req, additional=req.headers)
+        headers = [self.generate_request_headers(req, self.app.object_ring,
+                                                 additional=req.headers)
                    for _junk in range(n_outgoing)]
 
         for header in headers:

@@ -42,6 +42,7 @@ class FakeRing(object):
         self.replicas = replicas
         self.max_more_nodes = max_more_nodes
         self.devs = {}
+        self.hash_algorithm = 'md5'
 
     def set_replicas(self, replicas):
         self.replicas = replicas

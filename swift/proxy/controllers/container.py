@@ -154,7 +154,8 @@ class ContainerController(Controller):
             return HTTPNotFound(request=req)
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
-        headers = self.generate_request_headers(req, transfer=True)
+        headers = self.generate_request_headers(
+            req, self.app.container_ring, transfer=True)
         clear_info_cache(self.app, req.environ,
                          self.account_name, self.container_name)
         resp = self.make_requests(
@@ -186,7 +187,8 @@ class ContainerController(Controller):
 
     def _backend_requests(self, req, n_outgoing,
                           account_partition, accounts):
-        headers = [self.generate_request_headers(req, transfer=True)
+        headers = [self.generate_request_headers(req, self.app.container_ring,
+                                                 transfer=True)
                    for _junk in range(n_outgoing)]
 
         for i, account in enumerate(accounts):

@@ -28,7 +28,7 @@ import swift.common.db
 from swift.container.backend import ContainerBroker
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.request_helpers import get_param, get_listing_content_type, \
-    split_and_validate_path
+    split_and_validate_path, get_hash_algorithm
 from swift.common.utils import get_logger, public, validate_sync_to, \
     config_true_value, json, timing_stats, replication, \
     override_bytes_from_content_type
@@ -79,7 +79,8 @@ class ContainerController(object):
         swift.common.db.DB_PREALLOCATION = \
             config_true_value(conf.get('db_preallocation', 'f'))
 
-    def _get_container_broker(self, drive, part, account, container, **kwargs):
+    def _get_container_broker(self, drive, part, account, container,
+                              hash_algorithm, **kwargs):
         """
         Get a DB broker for the container.
 
@@ -87,9 +88,10 @@ class ContainerController(object):
         :param part: partition the container is in
         :param account: account name
         :param container: container name
+        :param hash_algorithm: hash to use in computing the filename
         :returns: ContainerBroker object
         """
-        hsh = hash_path(account, container)
+        hsh = hash_path(account, container, hash_algorithm=hash_algorithm)
         db_dir = storage_directory(DATADIR, part, hsh)
         db_path = os.path.join(self.root, drive, db_dir, hsh + '.db')
         kwargs.setdefault('account', account)
@@ -191,7 +193,9 @@ class ContainerController(object):
                                   content_type='text/plain')
         if self.mount_check and not check_mount(self.root, drive):
             return HTTPInsufficientStorage(drive=drive, request=req)
-        broker = self._get_container_broker(drive, part, account, container)
+        broker = self._get_container_broker(
+            drive, part, account, container,
+            hash_algorithm=get_hash_algorithm(req))
         if account.startswith(self.auto_create_account_prefix) and obj and \
                 not os.path.exists(broker.db_file):
             try:
@@ -238,7 +242,9 @@ class ContainerController(object):
         if self.mount_check and not check_mount(self.root, drive):
             return HTTPInsufficientStorage(drive=drive, request=req)
         timestamp = normalize_timestamp(req.headers['x-timestamp'])
-        broker = self._get_container_broker(drive, part, account, container)
+        broker = self._get_container_broker(
+            drive, part, account, container,
+            hash_algorithm=get_hash_algorithm(req))
         if obj:     # put container object
             if account.startswith(self.auto_create_account_prefix) and \
                     not os.path.exists(broker.db_file):
@@ -294,9 +300,10 @@ class ContainerController(object):
         out_content_type = get_listing_content_type(req)
         if self.mount_check and not check_mount(self.root, drive):
             return HTTPInsufficientStorage(drive=drive, request=req)
-        broker = self._get_container_broker(drive, part, account, container,
-                                            pending_timeout=0.1,
-                                            stale_reads_ok=True)
+        broker = self._get_container_broker(
+            drive, part, account, container,
+            pending_timeout=0.1, stale_reads_ok=True,
+            hash_algorithm=get_hash_algorithm(req))
         if broker.is_deleted():
             return HTTPNotFound(request=req)
         info = broker.get_info()
@@ -363,9 +370,10 @@ class ContainerController(object):
         out_content_type = get_listing_content_type(req)
         if self.mount_check and not check_mount(self.root, drive):
             return HTTPInsufficientStorage(drive=drive, request=req)
-        broker = self._get_container_broker(drive, part, account, container,
-                                            pending_timeout=0.1,
-                                            stale_reads_ok=True)
+        broker = self._get_container_broker(
+            drive, part, account, container,
+            pending_timeout=0.1, stale_reads_ok=True,
+            hash_algorithm=get_hash_algorithm(req))
         if broker.is_deleted():
             return HTTPNotFound(request=req)
         info = broker.get_info()
@@ -447,7 +455,9 @@ class ContainerController(object):
                 return HTTPBadRequest(err)
         if self.mount_check and not check_mount(self.root, drive):
             return HTTPInsufficientStorage(drive=drive, request=req)
-        broker = self._get_container_broker(drive, part, account, container)
+        broker = self._get_container_broker(
+            drive, part, account, container,
+            hash_algorithm=get_hash_algorithm(req))
         if broker.is_deleted():
             return HTTPNotFound(request=req)
         timestamp = normalize_timestamp(req.headers['x-timestamp'])

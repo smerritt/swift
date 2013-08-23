@@ -365,14 +365,15 @@ class DiskFile(object):
                  logger, disk_chunk_size=65536,
                  bytes_per_sync=(512 * 1024 * 1024),
                  iter_hook=None, threadpool=None, obj_dir='objects',
-                 mount_check=False):
+                 mount_check=False, hash_algorithm='md5'):
         if mount_check and not check_mount(path, device):
             raise DiskFileDeviceUnavailable()
         self.disk_chunk_size = disk_chunk_size
         self.bytes_per_sync = bytes_per_sync
         self.iter_hook = iter_hook
         self.name = '/' + '/'.join((account, container, obj))
-        name_hash = hash_path(account, container, obj)
+        name_hash = hash_path(
+            account, container, obj, hash_algorithm=hash_algorithm)
         self.datadir = join(
             path, device, storage_directory(obj_dir, partition, name_hash))
         self.device_path = join(path, device)
