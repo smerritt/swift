@@ -100,7 +100,7 @@ def parse_storage_policies(conf):
     and assuring that a "0 policy" will exist even if not specified and
     also that a "default policy" will exist even if not specified
 
-    :param conf: fconfig parser object for swift.conf
+    :param conf: config parser object for swift.conf
     """
     policies = []
     names = []
