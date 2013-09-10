@@ -137,8 +137,14 @@ def parse_storage_policies(conf):
                 policy_name,
                 is_default=config_true_value(is_default)))
 
-    # If a 0 policy wasn't explicitly given, or nothing was
-    # provided, create the 0 policy now
+    # If a 0 policy wasn't explicitly given, or nothing was provided, create
+    # the 0 policy now. The 0 policy is the default for pre-existing
+    # containers (ones with no storage policy at all).
+    #
+    # In case of a new cluster with no name for policy 0, the policy will
+    # exist, but new containers won't be able to use it (because it's unnamed)
+    # and there are no old containers, so it will simply exist, occupying a
+    # tiny amount of memory, serving no purpose.
     if not policies or need_pol0:
         policies.append(StoragePolicy('0', '', '', False))
 
