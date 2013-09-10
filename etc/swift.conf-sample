@@ -23,7 +23,7 @@ swift_hash_path_prefix = changeme
 # example the 'turkey' policy could have a lower or higher # of replicas
 # than storage policy 0. The ring filename will be based on 'object-1'
 #[storage-policy:1]
-#name=trukey
+#name=turkey
 #default = yes
 
 # The swift-constraints section sets the basic constraints on data
