@@ -72,7 +72,7 @@ class TestFuncs(unittest.TestCase):
         self.app = proxy_server.Application(None, FakeMemcache(),
                                             account_ring=FakeRing(),
                                             container_ring=FakeRing(),
-                                            stor_policies=policy_coll)
+                                            storage_policies=policy_coll)
 
     def test_GETorHEAD_base(self):
         base = Controller(self.app)

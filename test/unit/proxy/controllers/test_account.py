@@ -26,10 +26,10 @@ class TestAccountController(unittest.TestCase):
     def setUp(self):
         policy = [StoragePolicy('0', '', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
-        self.app = proxy_server.Application(None, FakeMemcache(),
-                                            account_ring=FakeRing(),
-                                            container_ring=FakeRing(),
-                                            stor_policies=policy_coll)
+        self.app = proxy_server.Application(
+            None, FakeMemcache(),
+            account_ring=FakeRing(), container_ring=FakeRing(),
+            storage_policies=policy_coll)
 
     def test_account_info_in_response_env(self):
         controller = proxy_server.AccountController(self.app, 'AUTH_bob')

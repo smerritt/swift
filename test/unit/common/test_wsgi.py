@@ -36,7 +36,7 @@ import swift
 from swift.common.swob import Request
 from swift.common import wsgi, utils, ring
 from swift.common.storage_policy import StoragePolicy, \
-    StoragePolicyCollection, get_stor_pols
+    StoragePolicyCollection
 
 from test.unit import temptree
 
@@ -58,19 +58,15 @@ def _fake_rings(tmpdir):
                      {'id': 1, 'zone': 1, 'device': 'sdb1', 'ip': '127.0.0.1',
                       'port': 6021}], 30),
                     f)
-    """
-    create polic fake rings. The rings can share devices for these
-    tests as they're not acuttaly used
-    """
-    policy = [StoragePolicy('unit-test', '', False),
-              StoragePolicy('0', 'zero', False),
-              StoragePolicy('1', 'one', True)]
+
+    # Some storage-policy-specific fake rings.
+    policy = [StoragePolicy(0, 'zero'),
+              StoragePolicy(1, 'one', is_default=True)]
     policies = StoragePolicyCollection(policy)
-    """ unit test code needs to pass in hardcoded policies for testing """
-    get_stor_pols(policies)
-    for pol in policies.pols.keys():
+
+    for pol in policies:
         with closing(GzipFile(os.path.join(tmpdir, \
-                policies.pols.get(pol).ring_name + '.ring.gz'), 'wb')) as f:
+                pol.ring_name + '.ring.gz'), 'wb')) as f:
             pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
                         [{'id': 0, 'zone': 0, 'device': 'sda1', \
                             'ip': '127.0.0.1',
@@ -78,6 +74,7 @@ def _fake_rings(tmpdir):
                          {'id': 1, 'zone': 1, 'device': 'sdb1', \
                             'ip': '127.0.0.1',
                           'port': 6020}], 30), f)
+
 
 class TestWSGI(unittest.TestCase):
     """ Tests for swift.common.wsgi """

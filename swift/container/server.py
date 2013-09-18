@@ -25,13 +25,13 @@ from xml.etree.cElementTree import Element, SubElement, tostring
 from eventlet import Timeout
 
 import swift.common.db
+import swift.common.storage_policy
 from swift.common.db import ContainerBroker
 from swift.common.request_helpers import get_param
 from swift.common.utils import get_logger, hash_path, public, \
     normalize_timestamp, storage_directory, validate_sync_to, \
     config_true_value, validate_device_partition, json, timing_stats, \
     replication, parse_content_type
-from swift.common.storage_policy import get_stor_pols
 from swift.common.constraints import CONTAINER_LISTING_LIMIT, \
     check_mount, check_float, check_utf8, FORMAT2CONTENT_TYPE
 from swift.common.bufferedhttp import http_connect
@@ -55,7 +55,7 @@ class ContainerController(object):
                     'x-container-sync-key', 'x-container-sync-to',
                     POLICY_INDEX.lower()]
 
-    def __init__(self, conf):
+    def __init__(self, conf, storage_policies=None):
         self.logger = get_logger(conf, log_route='container-server')
         self.root = conf.get('devices', '/srv/node/')
         self.mount_check = config_true_value(conf.get('mount_check', 'true'))
@@ -78,6 +78,7 @@ class ContainerController(object):
             self.save_headers.append('x-versions-location')
         swift.common.db.DB_PREALLOCATION = \
             config_true_value(conf.get('db_preallocation', 'f'))
+        self.policies = storage_policies or swift.common.storage_policy
 
     def _get_container_broker(self, drive, part, account, container, **kwargs):
         """
@@ -97,15 +98,16 @@ class ContainerController(object):
         kwargs.setdefault('logger', self.logger)
         return ContainerBroker(db_path, **kwargs)
 
+    # XXX FIXME
     def validate_policy_in_header(self, req):
         if POLICY in req.headers:
             """
             validate and convert given policy name to index to be
             saved with container metadata
             """
-            pol_idx = get_stor_pols().policy_to_index(req.headers[POLICY])
-            if pol_idx is not None:
-                req.headers.update({POLICY_INDEX: pol_idx})
+            pol = self.policies.get_by_name(req.headers[POLICY])
+            if pol:
+                req.headers.update({POLICY_INDEX: str(pol.idx)})
             else:
                 return False
         return True
@@ -262,7 +264,7 @@ class ContainerController(object):
             return HTTPBadRequest(
                 request=req,
                 content_type="text/plain",
-                body=("Invalid X--Storage-Policy %s" %
+                body=("Invalid X-Storage-Policy %s" %
                       req.headers[POLICY]))
         timestamp = normalize_timestamp(req.headers['x-timestamp'])
         broker = self._get_container_broker(drive, part, account, container)
@@ -310,13 +312,12 @@ class ContainerController(object):
                     metadata[POLICY_INDEX] = (requested_policy_index,
                                               timestamp)
             elif created:
-                """ new cont no policy specified, add the default """
-                metadata[POLICY_INDEX] = (get_stor_pols().get_def_policy().idx,
+                # new container, no policy specified: add the default
+                metadata[POLICY_INDEX] = (self.policies.get_default().idx,
                                           timestamp)
             elif broker.metadata.get(POLICY_INDEX, (None, None))[0] is None:
-                """ existing cont no policy specified, add the 0 policy """
-                metadata[POLICY_INDEX] = (get_stor_pols().get_policy_0().idx,
-                                          timestamp)
+                # existing container, no policy specified: add policy 0
+                metadata[POLICY_INDEX] = (0, timestamp)
             if 'X-Container-Sync-To' in metadata:
                 if 'X-Container-Sync-To' not in broker.metadata or \
                         metadata['X-Container-Sync-To'][0] != \

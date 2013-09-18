@@ -33,11 +33,11 @@ from time import time
 
 from eventlet import Timeout
 
+import swift.common.storage_policy
 from swift.common.ring import Ring
 from swift.common.utils import cache_from_env, get_logger, \
     get_remote_client, split_path, config_true_value, generate_trans_id, \
     affinity_key_function, affinity_locality_predicate
-from swift.common.storage_policy import get_stor_pols
 from swift.common.constraints import check_utf8
 from swift.proxy.controllers import AccountController, ObjectController, \
     ContainerController
@@ -50,7 +50,7 @@ class Application(object):
     """WSGI application for the proxy server."""
 
     def __init__(self, conf, memcache=None, logger=None, account_ring=None,
-                 container_ring=None, stor_policies=None):
+                 container_ring=None, storage_policies=None):
         if conf is None:
             conf = {}
         if logger is None:
@@ -59,6 +59,7 @@ class Application(object):
             self.logger = logger
 
         swift_dir = conf.get('swift_dir', '/etc/swift')
+        self.swift_dir = swift_dir
         self.node_timeout = int(conf.get('node_timeout', 10))
         self.conn_timeout = float(conf.get('conn_timeout', 0.5))
         self.client_timeout = int(conf.get('client_timeout', 60))
@@ -80,23 +81,11 @@ class Application(object):
             config_true_value(conf.get('object_post_as_copy', 'true'))
         self.resellers_conf = ConfigParser()
         self.resellers_conf.read(os.path.join(swift_dir, 'resellers.conf'))
-        """
-        self.policies is based off of the util.py get_stor_pols()
-        and completed here with an instantiated ring per policy.  For
-        regular operation the stor_policies partm is None, for unit test
-        it is either fake policies passed in directly or the unit test
-        code identifies its need to isntantiate real polcies using a flag
-        """
-        if stor_policies is None or 'unit-test' in stor_policies.pols.keys():
-            pol_template = get_stor_pols(stor_policies)
-            for pol in pol_template.pols.keys():
-                pol_template.pols.get(pol).object_ring = \
-                    Ring(swift_dir,
-                         ring_name=pol_template.pols.get(pol).ring_name)
-            self.policies = pol_template
-        else:
-            self.policies = stor_policies
 
+        # either pass in a custom collection of policies (mainly for
+        # testability), or else use the default one that's built up from
+        # swift.conf.
+        self.policies = storage_policies or swift.common.storage_policy
         self.container_ring = container_ring or Ring(swift_dir,
                                                      ring_name='container')
         self.account_ring = account_ring or Ring(swift_dir,
@@ -181,13 +170,6 @@ class Application(object):
             name.strip()
             for name in swift_owner_headers.split(',') if name.strip()]
 
-        """Temp print for debug to remove after review"""
-        for pol in self.policies.pols.keys():
-            self.logger.info(_('*** debug: pol name,idx,ring = %s,%s,%s'),
-                             self.policies.pols.get(pol).name,
-                             self.policies.pols.get(pol).idx,
-                             self.policies.pols.get(pol).object_ring)
-
     def get_object_ring(self, policy_idx):
         """
         Get the ring object to use to handle a request based on its policy.
@@ -196,7 +178,18 @@ class Application(object):
         :returns: appropriate ring object
 
         """
-        return self.policies.index_to_policy(policy_idx).object_ring
+        if policy_idx is None:
+            policy_idx = 0
+        else:
+            # makes it easier for callers to just pass in a header value
+            policy_idx = int(policy_idx)
+        policy = self.policies.get_by_index(policy_idx)
+        if not policy:
+            raise ValueError("No policy with index %d" % policy_idx)
+        if not policy.object_ring:
+            policy.object_ring = Ring(self.swift_dir,
+                                      ring_name=policy.ring_name)
+        return policy.object_ring
 
     def get_controller(self, path):
         """
@@ -237,7 +230,7 @@ class Application(object):
             err = HTTPPreconditionFailed(
                 request=req, body='Invalid UTF8 or contains NULL')
             return err(env, start_response)
-        except (Exception, Timeout):
+        except (Exception, Timeout) as err:
             start_response('500 Server Error',
                            [('Content-Type', 'text/plain')])
             return ['Internal server error.\n']

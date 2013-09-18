@@ -26,7 +26,7 @@ class TestObjControllerWriteAffinity(unittest.TestCase):
         policy_coll = StoragePolicyCollection(policy)
         self.app = proxy_server.Application(
             None, FakeMemcache(), account_ring=FakeRing(),
-            container_ring=FakeRing(), stor_policies=policy_coll)
+            container_ring=FakeRing(), storage_policies=policy_coll)
         self.app.request_node_count = lambda ring: 10000000
         self.app.sort_nodes = lambda l: l  # stop shuffling the primary nodes
 

@@ -18,8 +18,8 @@ import unittest
 import StringIO
 from ConfigParser import ConfigParser
 from swift.common.utils import config_true_value
-from swift.common.storage_policy import get_stor_pols, \
-    parse_storage_policies, StoragePolicy, StoragePolicyCollection
+from swift.common import storage_policy
+
 
 class TestStoragePolicies(unittest.TestCase):
 
@@ -30,12 +30,12 @@ class TestStoragePolicies(unittest.TestCase):
         return conf
 
     def test_defaults(self):
-        policies = get_stor_pols()
+        policies = storage_policy.get_policies()
         self.assert_(len(policies) > 0)
-        default_policy = policies.get_def_policy()
+        default_policy = policies.default
         self.assert_(default_policy.is_default)
         zero_policy = policies.get_policy_0()
-        self.assert_(zero_policy.idx == '0')
+        self.assert_(zero_policy.idx == 0)
 
     def test_parse_storage_policies(self):
         conf = self._conf("""
@@ -47,51 +47,49 @@ class TestStoragePolicies(unittest.TestCase):
         [storage-policy:6]
         name = apple
         """)
-        stor_pols = parse_storage_policies(conf)
+        stor_pols = storage_policy.parse_storage_policies(conf)
 
-        self.assertEquals(stor_pols.get_def_policy(),
-                          stor_pols.default)
+        print repr(stor_pols.__dict__)
 
-        self.assert_(stor_pols.get_def_policy().name == 'one')
-        self.assert_(stor_pols.get_policy_0().name == 'zero')
+        self.assertEquals(stor_pols.get_default(), stor_pols.default)
 
-        self.assertEquals("object", stor_pols.get("zero").ring_name)
-        self.assertEquals("object-5", stor_pols.get("one").ring_name)
-        self.assertEquals("object-6", stor_pols.get("apple").ring_name)
+        self.assertEquals(stor_pols.default.name, 'one')
+        self.assertEquals(stor_pols.get_policy_0().name, 'zero')
 
-        self.assertEquals("objects", stor_pols.get("zero").data_dir)
-        self.assertEquals("objects-5", stor_pols.get("one").data_dir)
-        self.assertEquals("objects-6", stor_pols.get("apple").data_dir)
+        self.assertEquals("object", stor_pols.get_by_name("zero").ring_name)
+        self.assertEquals("object-5", stor_pols.get_by_name("one").ring_name)
+        self.assertEquals("object-6", stor_pols.get_by_name("apple").ring_name)
 
-        self.assertEquals("0", stor_pols.get("zero").idx)
-        self.assertEquals("5", stor_pols.get("one").idx)
-        self.assertEquals("6", stor_pols.get("apple").idx)
+        self.assertEquals("objects", stor_pols.get_by_name("zero").data_dir)
+        self.assertEquals("objects-5", stor_pols.get_by_name("one").data_dir)
+        self.assertEquals("objects-6", stor_pols.get_by_name("apple").data_dir)
 
-        self.assertEquals("0", stor_pols.policy_to_index("zero"))
-        self.assertEquals("5", stor_pols.policy_to_index("one"))
-        self.assertEquals("6", stor_pols.policy_to_index("apple"))
-        self.assertEquals(None, stor_pols.policy_to_index("notThere"))
-        self.assertEquals("0", stor_pols.policy_to_index(""))
+        self.assertEquals(0, stor_pols.get_by_name("zero").idx)
+        self.assertEquals(5, stor_pols.get_by_name("one").idx)
+        self.assertEquals(6, stor_pols.get_by_name("apple").idx)
 
-        self.assertEquals("zero", stor_pols.index_to_policy("0").name)
-        self.assertEquals("one", stor_pols.index_to_policy("5").name)
-        self.assertEquals("apple", stor_pols.index_to_policy("6").name)
-        self.assertEquals("zero", stor_pols.index_to_policy(None).name)
+        self.assertEquals("zero", stor_pols.get_by_index(0).name)
+        self.assertEquals("zero", stor_pols.get_by_index("0").name)
+        self.assertEquals("one", stor_pols.get_by_index(5).name)
+        self.assertEquals("apple", stor_pols.get_by_index(6).name)
+        self.assertEquals("zero", stor_pols.get_by_index(None).name)
 
-        self.assertRaises(ValueError, stor_pols.index_to_policy,"99")
-        self.assertRaises(ValueError, stor_pols.index_to_policy,"")
+        self.assertRaises(ValueError, stor_pols.get_by_index, "")
+        self.assertRaises(ValueError, stor_pols.get_by_index, "ein")
 
     def test_parse_storage_policies_malformed(self):
         conf = self._conf("""
         [storage-policy:chicken]
         [storage-policy:1]
         """)
-        self.assertRaises(ValueError, parse_storage_policies, conf)
+        self.assertRaises(
+            ValueError, storage_policy.parse_storage_policies, conf)
 
         conf1 = self._conf("""
         [storage-policy:]
         """)
-        self.assertRaises(ValueError, parse_storage_policies, conf)
+        self.assertRaises(
+            ValueError, storage_policy.parse_storage_policies, conf)
 
         conf = self._conf("""
         [storage-policy:0]
@@ -99,7 +97,8 @@ class TestStoragePolicies(unittest.TestCase):
         [storage-policy:1]
         name = zero
         """)
-        self.assertRaises(ValueError, parse_storage_policies, conf)
+        self.assertRaises(
+            ValueError, storage_policy.parse_storage_policies, conf)
 
     def test_multiple_defaults_is_error(self):
         conf = self._conf("""
@@ -109,24 +108,25 @@ class TestStoragePolicies(unittest.TestCase):
         default = yes
         [storage-policy:3]
         """)
-        self.assertRaises(ValueError, parse_storage_policies, conf)
+        self.assertRaises(
+            ValueError, storage_policy.parse_storage_policies, conf)
 
     def test_no_default_specified(self):
         conf = self._conf("""
         [storage-policy:1]
         [storage-policy:2]
         """)
-        stor_pols = parse_storage_policies(conf)
+        stor_pols = storage_policy.parse_storage_policies(conf)
 
-        self.assert_(stor_pols.get_policy_0().idx == '0')
+        self.assertEquals(stor_pols.get_policy_0().idx, 0)
+
         conf = self._conf("""
         [storage-policy:0]
         name = thisOne
         [storage-policy:2]
         """)
-        stor_pols = parse_storage_policies(conf)
-
-        self.assert_(stor_pols.get_def_policy().name == 'thisOne')
+        stor_pols = storage_policy.parse_storage_policies(conf)
+        self.assertEqual(stor_pols.default.name, 'thisOne')
 
 if __name__ == '__main__':
     unittest.main()

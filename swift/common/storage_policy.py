@@ -20,26 +20,34 @@ from swift.common.utils import config_true_value
 class StoragePolicy(object):
     """
     Represents a storage policy.
-    Not meant to be instantiated directly; use get_stor_pols().
+    Not meant to be instantiated directly; use get_storage_policies().
     """
     def __init__(self, idx, name, is_default=False, object_ring=None):
         self.name = name
-        self.idx = idx
+        self.idx = int(idx)
         self.is_default = is_default
-        if self.idx == '0':
-            ring_name = "object"
+        if self.idx == 0:
             data_dir = "objects"
         else:
-            ring_name = "object-" + self.idx
-            data_dir = "objects-" + self.idx
-        self.ring_name = ring_name
+            data_dir = "objects-%d" % self.idx
         self.object_ring = object_ring
         self.data_dir = data_dir
+
+    def __repr__(self):
+        return "StoragePolicy(%d, %r, is_default=%s, object_ring=%r)" % (
+            self.idx, self.name, self.is_default, self.object_ring)
+
+    @property
+    def ring_name(self):
+        if self.idx == 0:
+            return 'object'
+        else:
+            return 'object-%d' % self.idx
 
 
 class StoragePolicyCollection(object):
     """
-    This class reppresents the collection of valid storage policies for
+    This class represents the collection of valid storage policies for
     the cluster and instantiated when swift.conf is parsed; as policy
     objects (StoragePolicy) are added to the collection it assures that
     only one is specified as the default.  It also provides various
@@ -50,48 +58,53 @@ class StoragePolicyCollection(object):
               no policy was identified in the container metadata
     """
     def __init__(self, pols):
-        self.pols = dict((pol.idx, pol) for pol in pols)
+        # keep them indexed for quicker lookups
+        self.pols_by_name = dict((pol.name, pol) for pol in pols)
+        self.pols_by_index = dict((int(pol.idx), pol) for pol in pols)
         defaults = [pol for pol in pols if pol.is_default]
         if len(defaults) > 1:
             msg = "Too many default storage policies: %s" % \
                 (", ".join((pol.name for pol in defaults)))
             raise ValueError(msg)
         self.default = defaults[0]
-        """ also save a 'by name' format for quicker name lookups """
-        self.pols_by_name = dict((pol.name, pol) for pol in pols)
 
     def __len__(self):
-        return len(self.pols)
+        return len(self.pols_by_index)
 
     def __getitem__(self, key):
-        return self.pols[key]
+        return self.get_by_index[key]
 
-    def get(self, key):
-        return self.pols.get(self.policy_to_index(key))
+    def __iter__(self):
+        return self.pols_by_name.itervalues()
 
-    def get_def_policy(self):
+    def get_default(self):
         return self.default
 
-    def index_to_policy(self, index):
+    def get_by_name(self, name):
+        """
+        Find a storage policy by its name.
+
+        :param name: name of the policy
+        :returns: storage policy, or None
+        """
+        return self.pols_by_name.get(name)
+
+    def get_by_index(self, index):
+        """
+        Find a storage policy by its index.
+
+        An index of None will be treated as 0.
+
+        :param index: numeric index of the storage policy
+        :returns: storage policy, or None if no such policy
+        """
         if index is None:
-            index = '0'
-        try:
-            policy = self.pols[index]
-        except KeyError:
-            raise ValueError("Fatal: no policy found")
-        return policy
+            index = 0
+        return self.pols_by_index.get(int(index))
 
+    # XXX is this really necessary?
     def get_policy_0(self):
-        return self.index_to_policy('0')
-
-    def policy_to_index(self, name):
-        if name is "":
-            return '0'
-        try:
-            policy = self.pols_by_name[name]
-        except KeyError:
-            return None
-        return policy.idx
+        return self.get_by_index(0)
 
 
 def parse_storage_policies(conf):
@@ -109,9 +122,9 @@ def parse_storage_policies(conf):
     for section in conf.sections():
         section_policy = section.split(':')
         if len(section_policy) > 1 and section_policy[0] == 'storage-policy':
-            if section_policy[1].isdigit() is True:
-                policy_idx = section_policy[1]
-                if policy_idx == '0':
+            if section_policy[1].isdigit():
+                policy_idx = int(section_policy[1])
+                if policy_idx == 0:
                     need_pol0 = False
             else:
                 raise ValueError("Malformed storage policy %s" % section)
@@ -146,31 +159,55 @@ def parse_storage_policies(conf):
     # and there are no old containers, so it will simply exist, occupying a
     # tiny amount of memory, serving no purpose.
     if not policies or need_pol0:
-        policies.append(StoragePolicy('0', '', '', False))
+        policies.append(StoragePolicy(0, '', '', False))
 
     # if nothing was specified as default for new containers,
     # specify policy 0 now
     if need_default:
         for policy in policies:
-            if policy.idx == '0':
+            if policy.idx == 0:
                 policy.is_default = 'yes'
     return StoragePolicyCollection(policies)
 
-
-def get_stor_pols(policies=None):
-    global STOR_POLICIES
-    """unit test code will pass its policies in"""
-    if policies is None:
-        return STOR_POLICIES
-    else:
-        """remove test flag added by unit test code"""
-        del policies.pols['unit-test']
-        STOR_POLICIES = policies
-        return policies
-
-pol_conf = ConfigParser()
-if pol_conf.read('/etc/swift/swift.conf'):
-    STOR_POLICIES = parse_storage_policies(pol_conf)
+policy_conf = ConfigParser()
+if policy_conf.read('/etc/swift/swift.conf'):
+    POLICIES = parse_storage_policies(policy_conf)
 else:
-    """setup default policy collection for unit test code"""
-    STOR_POLICIES = StoragePolicyCollection([StoragePolicy('0', '', 'yes')])
+    # set up default policy collection for unit test code
+    POLICIES = StoragePolicyCollection([StoragePolicy(0, '', 'yes')])
+
+
+# Convenience functions, nothing more. Might not end up needing these.
+def get_by_name(name):
+    """
+    Finds a storage policy by name.
+
+    :param name: name of the storage policy
+    :returns: StoragePolicy object, or None
+    """
+    return POLICIES.get_by_name(name)
+
+
+def get_by_index(index):
+    """
+    Finds a storage policy by index.
+
+    :param index: index of the storage policy
+    :returns: StoragePolicy object, or None
+    """
+    return POLICIES.get_by_index(index)
+
+
+def get_default():
+    """
+    Returns the default storage policy for new containers.
+
+    Note that this is not necessarily the policy given to migrated containers.
+
+    :returns: default policy (StoragePolicy object)
+    """
+    return POLICIES.default
+
+
+def get_policies():
+    return POLICIES

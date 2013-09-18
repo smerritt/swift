@@ -32,7 +32,7 @@ from swift.container import server as container_server
 from swift.common.utils import normalize_timestamp, mkdirs, public, replication
 from test.unit import fake_http_connect
 from swift.common.storage_policy import StoragePolicy, \
-    StoragePolicyCollection, get_stor_pols
+    StoragePolicyCollection
 from swift.proxy.controllers.base import POLICY, POLICY_INDEX
 
 @contextmanager
@@ -55,19 +55,16 @@ class TestContainerController(unittest.TestCase):
         rmtree(self.testdir)
         mkdirs(os.path.join(self.testdir, 'sda1'))
         mkdirs(os.path.join(self.testdir, 'sda1', 'tmp'))
+        policies = StoragePolicyCollection(
+            [StoragePolicy('0', 'zero', False),
+             StoragePolicy('1', 'one', True),
+             StoragePolicy('2', 'two', False),
+             StoragePolicy('3', 'three', False)])
         self.controller = container_server.ContainerController(
-            {'devices': self.testdir, 'mount_check': 'false'})
-        policy = [StoragePolicy('unit-test', '', False),
-                  StoragePolicy('0', 'zero', False),
-                  StoragePolicy('1', 'one', True),
-                  StoragePolicy('2', 'two', False),
-                  StoragePolicy('3', 'three', False)]
-        self.policies = StoragePolicyCollection(policy)
-        """ unit test code needs to pass in hardcoded policies for testing """
-        get_stor_pols(self.policies)
+            {'devices': self.testdir, 'mount_check': 'false'},
+            storage_policies=policies)
 
     def tearDown(self):
-        """ Tear down for testing swift.object_server.ObjectController """
         rmtree(os.path.dirname(self.testdir), ignore_errors=1)
 
 

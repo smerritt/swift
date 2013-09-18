@@ -795,7 +795,7 @@ class ObjectController(Controller):
         for node in nodes:
             try:
                 start_time = time.time()
-                with ConnectionTimeout(self.app.conn_timeout):
+                with ConnectionTimeout(self.app.conn_timeout * 4):
                     conn = http_connect(
                         node['ip'], node['port'], node['device'], part, 'PUT',
                         path, headers)

@@ -139,11 +139,10 @@ def setup():
     by passing in two policies, the first one is just a flag so Application knows
     that this is a unit test case
     """
-    policy = [StoragePolicy('unit-test', '', False),
-              StoragePolicy('0', 'zero', True),
-              StoragePolicy('1', 'one', False),
-              StoragePolicy('2', 'two', False)]
-    policies = StoragePolicyCollection(policy)
+    policies = StoragePolicyCollection([
+        StoragePolicy(0, 'zero', True),
+        StoragePolicy(1, 'one', False),
+        StoragePolicy(2, 'two', False)])
     with closing(GzipFile(os.path.join(_testdir, 'object.ring.gz'), 'wb')) \
             as f:
         pickle.dump(ring.RingData([[0, 1, 0, 1], [1, 0, 1, 0]],
@@ -170,11 +169,14 @@ def setup():
                     f)
 
     prosrv = proxy_server.Application(conf, FakeMemcacheReturnsNone(),
-                                      stor_policies=policies)
+                                      storage_policies=policies)
     acc1srv = account_server.AccountController(conf)
     acc2srv = account_server.AccountController(conf)
-    con1srv = container_server.ContainerController(conf)
-    con2srv = container_server.ContainerController(conf)
+    # XXX this is sort of weird... I feel like all the translation of name to
+    # index should take place entirely within the scope of the proxy server,
+    # and the container server should just get indices.
+    con1srv = container_server.ContainerController(conf, storage_policies=policies)
+    con2srv = container_server.ContainerController(conf, storage_policies=policies)
     obj1srv = object_server.ObjectController(conf)
     obj2srv = object_server.ObjectController(conf)
     _test_servers = \
@@ -298,7 +300,7 @@ class TestController(unittest.TestCase):
         app = proxy_server.Application(None, self.memcache,
                                        account_ring=self.account_ring,
                                        container_ring=self.container_ring,
-                                       stor_policies=policy_coll)
+                                       storage_policies=policy_coll)
         self.controller = swift.proxy.controllers.Controller(app)
 
         class FakeReq(object):
@@ -554,14 +556,14 @@ class TestProxyServer(unittest.TestCase):
 
     def test_get_object_ring(self):
 
-        policy = [StoragePolicy('0', 'a', False, 123),
-            StoragePolicy('1', 'b', True, 456),
-            StoragePolicy('2', 'd', False, 789)]
+        policy = [StoragePolicy(0, 'a', False, 123),
+                  StoragePolicy(1, 'b', True, 456),
+                  StoragePolicy(2, 'd', False, 789)]
         policy_coll = StoragePolicyCollection(policy)
         baseapp = proxy_server.Application({},
                                            FakeMemcache(),
                                            container_ring=FakeRing(),
-                                           stor_policies=policy_coll,
+                                           storage_policies=policy_coll,
                                            account_ring=FakeRing())
 
         #None means legacy so always use policy 0
@@ -574,8 +576,8 @@ class TestProxyServer(unittest.TestCase):
         ring = baseapp.get_object_ring('2')
         self.assertEqual(ring, 789)
         #illegal values
-        self.assertRaises(ValueError, baseapp.get_object_ring,'99')
-        self.assertRaises(ValueError, baseapp.get_object_ring,'')
+        self.assertRaises(ValueError, baseapp.get_object_ring, '99')
+        self.assertRaises(ValueError, baseapp.get_object_ring, '')
 
     def test_unhandled_exception(self):
 
@@ -584,35 +586,35 @@ class TestProxyServer(unittest.TestCase):
             def get_controller(self, path):
                 raise Exception('this shouldnt be caught')
 
-        policy = [StoragePolicy('0', '', True, FakeRing())]
+        policy = [StoragePolicy(0, '', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
         app = MyApp(None, FakeMemcache(), account_ring=FakeRing(),
-                    container_ring=FakeRing(), stor_policies=policy_coll)
+                    container_ring=FakeRing(), storage_policies=policy_coll)
         req = Request.blank('/account', environ={'REQUEST_METHOD': 'HEAD'})
         app.update_request(req)
         resp = app.handle_request(req)
         self.assertEquals(resp.status_int, 500)
 
     def test_internal_method_request(self):
-        policy = [StoragePolicy('0', '', True, FakeRing())]
+        policy = [StoragePolicy(0, '', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
         baseapp = proxy_server.Application({},
                                            FakeMemcache(),
                                            container_ring=FakeRing(),
-                                           stor_policies=policy_coll,
+                                           storage_policies=policy_coll,
                                            account_ring=FakeRing())
         resp = baseapp.handle_request(
             Request.blank('/v1/a', environ={'REQUEST_METHOD': '__init__'}))
         self.assertEquals(resp.status, '405 Method Not Allowed')
 
     def test_inexistent_method_request(self):
-        policy = [StoragePolicy('0', '', True, FakeRing())]
+        policy = [StoragePolicy(0, '', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
         baseapp = proxy_server.Application({},
                                            FakeMemcache(),
                                            container_ring=FakeRing(),
                                            account_ring=FakeRing(),
-                                           stor_policies=policy_coll)
+                                           storage_policies=policy_coll)
         resp = baseapp.handle_request(
             Request.blank('/v1/a', environ={'REQUEST_METHOD': '!invalid'}))
         self.assertEquals(resp.status, '405 Method Not Allowed')
@@ -624,12 +626,12 @@ class TestProxyServer(unittest.TestCase):
             called[0] = True
         with save_globals():
             set_http_connect(200)
-            policy = [StoragePolicy('0', '', True, FakeRing())]
+            policy = [StoragePolicy(0, '', True, FakeRing())]
             policy_coll = StoragePolicyCollection(policy)
             app = proxy_server.Application(None, FakeMemcache(),
                                            account_ring=FakeRing(),
                                            container_ring=FakeRing(),
-                                           stor_policies=policy_coll)
+                                           storage_policies=policy_coll)
             req = Request.blank('/v1/a')
             req.environ['swift.authorize'] = authorize
             app.update_request(req)
@@ -642,12 +644,12 @@ class TestProxyServer(unittest.TestCase):
         def authorize(req):
             called[0] = True
             return HTTPUnauthorized(request=req)
-        policy = [StoragePolicy('0', '', True, FakeRing())]
+        policy = [StoragePolicy(0, '', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
         app = proxy_server.Application(None, FakeMemcache(),
                                        account_ring=FakeRing(),
                                        container_ring=FakeRing(),
-                                       stor_policies=policy_coll)
+                                       storage_policies=policy_coll)
         req = Request.blank('/v1/a')
         req.environ['swift.authorize'] = authorize
         app.update_request(req)
@@ -657,12 +659,12 @@ class TestProxyServer(unittest.TestCase):
     def test_negative_content_length(self):
         swift_dir = mkdtemp()
         try:
-            policy = [StoragePolicy('0', '', True, FakeRing())]
+            policy = [StoragePolicy(0, '', True, FakeRing())]
             policy_coll = StoragePolicyCollection(policy)
             baseapp = proxy_server.Application({'swift_dir': swift_dir},
                                                FakeMemcache(), FakeLogger(),
                                                FakeRing(), FakeRing(),
-                                               stor_policies=policy_coll)
+                                               storage_policies=policy_coll)
             resp = baseapp.handle_request(
                 Request.blank('/', environ={'CONTENT_LENGTH': '-1'}))
             self.assertEquals(resp.status, '400 Bad Request')
@@ -677,14 +679,14 @@ class TestProxyServer(unittest.TestCase):
     def test_denied_host_header(self):
         swift_dir = mkdtemp()
         try:
-            policy = [StoragePolicy('0', '', True, FakeRing())]
+            policy = [StoragePolicy(0, '', True, FakeRing())]
             policy_coll = StoragePolicyCollection(policy)
             baseapp = proxy_server.Application({'swift_dir': swift_dir,
                                                 'deny_host_headers':
                                                 'invalid_host.com'},
                                                FakeMemcache(), FakeLogger(),
                                                FakeRing(), FakeRing(),
-                                               stor_policies=policy_coll)
+                                               storage_policies=policy_coll)
             resp = baseapp.handle_request(
                 Request.blank('/v1/a/c/o',
                               environ={'HTTP_HOST': 'invalid_host.com'}))
@@ -693,12 +695,12 @@ class TestProxyServer(unittest.TestCase):
             rmtree(swift_dir, ignore_errors=True)
 
     def test_node_timing(self):
-        policy = [StoragePolicy('0', '', True, FakeRing())]
+        policy = [StoragePolicy(0, '', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
         baseapp = proxy_server.Application({'sorting_method': 'timing'},
                                            FakeMemcache(),
                                            container_ring=FakeRing(),
-                                           stor_policies=policy_coll,
+                                           storage_policies=policy_coll,
                                            account_ring=FakeRing())
         self.assertEquals(baseapp.node_timings, {})
 
@@ -723,13 +725,13 @@ class TestProxyServer(unittest.TestCase):
         self.assertEquals(res, exp_sorting)
 
     def test_node_affinity(self):
-        policy = [StoragePolicy('0', '', True, FakeRing())]
+        policy = [StoragePolicy(0, '', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
         baseapp = proxy_server.Application({'sorting_method': 'affinity',
                                             'read_affinity': 'r1=1'},
                                            FakeMemcache(),
                                            container_ring=FakeRing(),
-                                           stor_policies=policy_coll,
+                                           storage_policies=policy_coll,
                                            account_ring=FakeRing())
 
         nodes = [{'region': 2, 'zone': 1, 'ip': '127.0.0.1'},
@@ -744,12 +746,12 @@ class TestProxyServer(unittest.TestCase):
 class TestObjectController(unittest.TestCase):
 
     def setUp(self):
-        policy = [StoragePolicy('0', 'apple', True, FakeRing())]
+        policy = [StoragePolicy(0, 'apple', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
         self.app = proxy_server.Application(None, FakeMemcache(),
                                             account_ring=FakeRing(),
                                             container_ring=FakeRing(),
-                                            stor_policies=policy_coll)
+                                            storage_policies=policy_coll)
         monkey_patch_mimetools()
 
     def tearDown(self):
@@ -1728,12 +1730,12 @@ class TestObjectController(unittest.TestCase):
         try:
             with open(os.path.join(swift_dir, 'mime.types'), 'w') as fp:
                 fp.write('foo/bar foo\n')
-            policy = [StoragePolicy('0', '', True, FakeRing())]
+            policy = [StoragePolicy(0, '', True, FakeRing())]
             policy_coll = StoragePolicyCollection(policy)
             proxy_server.Application({'swift_dir': swift_dir},
                                      FakeMemcache(), FakeLogger(),
                                      FakeRing(), FakeRing(),
-                                     stor_policies=policy_coll)
+                                     storage_policies=policy_coll)
             self.assertEquals(proxy_server.mimetypes.guess_type('blah.foo')[0],
                               'foo/bar')
             self.assertEquals(proxy_server.mimetypes.guess_type('blah.jpg')[0],
@@ -5035,12 +5037,12 @@ class TestContainerController(unittest.TestCase):
     "Test swift.proxy_server.ContainerController"
 
     def setUp(self):
-        policy = [StoragePolicy('0', '', True, FakeRing())]
+        policy = [StoragePolicy(0, '', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
         self.app = proxy_server.Application(None, FakeMemcache(),
                                             account_ring=FakeRing(),
                                             container_ring=FakeRing(),
-                                            stor_policies=policy_coll)
+                                            storage_policies=policy_coll)
 
     def test_transfer_headers(self):
         src_headers = {'x-remove-versions-location': 'x',
@@ -5929,12 +5931,12 @@ class TestContainerController(unittest.TestCase):
 class TestAccountController(unittest.TestCase):
 
     def setUp(self):
-        policy = [StoragePolicy('0', '', True, FakeRing())]
+        policy = [StoragePolicy(0, '', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
         self.app = proxy_server.Application(None, FakeMemcache(),
                                             account_ring=FakeRing(),
                                             container_ring=FakeRing(),
-                                            stor_policies=policy_coll)
+                                            storage_policies=policy_coll)
 
     def assert_status_map(self, method, statuses, expected, env_expected=None):
         with save_globals():
@@ -6357,12 +6359,12 @@ class TestAccountControllerFakeGetResponse(unittest.TestCase):
     have to match the responses for empty accounts that really exist.
     """
     def setUp(self):
-        policy = [StoragePolicy('0', '', True, FakeRing())]
+        policy = [StoragePolicy(0, '', True, FakeRing())]
         policy_coll = StoragePolicyCollection(policy)
         self.app = proxy_server.Application(None, FakeMemcache(),
                                             account_ring=FakeRing(),
                                             container_ring=FakeRing(),
-                                            stor_policies=policy_coll)
+                                            storage_policies=policy_coll)
         self.app.memcache = FakeMemcacheReturnsNone()
         self.controller = proxy_server.AccountController(self.app, 'acc')
         self.controller.app.account_autocreate = True
