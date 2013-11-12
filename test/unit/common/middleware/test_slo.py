@@ -89,21 +89,72 @@ class FakeSwift(object):
         self._responses[(method, path)] = (response_class, headers, body)
 
 
-class TestSloMiddleware(unittest.TestCase):
-
+class SloTestCase(unittest.TestCase):
     def setUp(self):
         self.app = FakeSwift()
         self.slo = slo.filter_factory({})(self.app)
         self.slo.min_segment_size = 1
 
-        _submanifest_data = json.dumps(
-            [{'name': '/deltest/b_2', 'hash': 'a', 'bytes': '1'},
-             {'name': '/deltest/c_3', 'hash': 'b', 'bytes': '2'}])
+    def call_app(self, req, app=None):
+        if app is None:
+            app = self.app
+
+        status = [None]
+        headers = [None]
+
+        def start_response(s, h, ei=None):
+            status[0] = s
+            headers[0] = h
+
+        body = ''.join(app(req.environ, start_response))
+        return status[0], headers[0], body
+
+    def call_slo(self, req):
+        return self.call_app(req, app=self.slo)
+
+
+class TestSloMiddleware(SloTestCase):
+
+    def setUp(self):
+        super(TestSloMiddleware, self).setUp()
 
         self.app.register(
             'GET', '/', swob.HTTPOk, {}, 'passed')
         self.app.register(
             'PUT', '/', swob.HTTPOk, {}, 'passed')
+
+    def test_handle_multipart_no_obj(self):
+        req = Request.blank('/')
+        resp_iter = self.slo(req.environ, fake_start_response)
+        self.assertEquals(self.app.calls, [('GET', '/')])
+        self.assertEquals(''.join(resp_iter), 'passed')
+
+    def test_slo_header_assigned(self):
+        req = Request.blank(
+            '/v1/a/c/o', headers={'x-static-large-object': "true"})
+        resp = self.slo(req.environ, fake_start_response)
+        self.assert_(
+            resp[0].startswith('X-Static-Large-Object is a reserved header'))
+
+    def test_parse_input(self):
+        self.assertRaises(HTTPException, slo.parse_input, 'some non json')
+        data = json.dumps(
+            [{'path': '/cont/object', 'etag': 'etagoftheobjecitsegment',
+              'size_bytes': 100}])
+        self.assertEquals('/cont/object',
+                          slo.parse_input(data)[0]['path'])
+
+
+class TestSloPutManifest(SloTestCase):
+
+    def setUp(self):
+        super(TestSloPutManifest, self).setUp()
+
+        self.app.register(
+            'GET', '/', swob.HTTPOk, {}, 'passed')
+        self.app.register(
+            'PUT', '/', swob.HTTPOk, {}, 'passed')
+
         self.app.register(
             'HEAD', '/v1/AUTH_test/cont/object',
             swob.HTTPOk,
@@ -146,142 +197,6 @@ class TestSloMiddleware(unittest.TestCase):
 
         self.app.register(
             'PUT', '/v1/AUTH_test/checktest/man_3', swob.HTTPCreated, {}, None)
-
-        self.app.register(
-            'GET', '/v1/AUTH_test/deltest/man_404',
-            swob.HTTPNotFound, {}, None)
-        self.app.register(
-            'GET', '/v1/AUTH_test/deltest/man',
-            swob.HTTPOk, {'Content-Type': 'application/json',
-                          'X-Static-Large-Object': 'true'},
-            json.dumps([{'name': '/deltest/gone', 'hash': 'a', 'bytes': '1'},
-                        {'name': '/deltest/b_2', 'hash': 'b', 'bytes': '2'}]))
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest/man',
-            swob.HTTPNoContent, {}, None)
-        self.app.register(
-            'GET', '/v1/AUTH_test/deltest/man-all-there',
-            swob.HTTPOk, {'Content-Type': 'application/json',
-                          'X-Static-Large-Object': 'true'},
-            json.dumps([{'name': '/deltest/b_2', 'hash': 'a', 'bytes': '1'},
-                        {'name': '/deltest/c_3', 'hash': 'b', 'bytes': '2'}]))
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest/gone',
-            swob.HTTPNotFound, {}, None)
-        self.app.register(
-            'GET', '/v1/AUTH_test/deltest/a_1',
-            swob.HTTPOk, {'Content-Length': '1'}, 'a')
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest/a_1',
-            swob.HTTPNoContent, {}, None)
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest/b_2',
-            swob.HTTPNoContent, {}, None)
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest/c_3',
-            swob.HTTPNoContent, {}, None)
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest/d_3',
-            swob.HTTPNoContent, {}, None)
-
-        self.app.register(
-            'GET', '/v1/AUTH_test/deltest/manifest-with-submanifest',
-            swob.HTTPOk, {'Content-Type': 'application/json',
-                          'X-Static-Large-Object': 'true'},
-            json.dumps([{'name': '/deltest/a_1',
-                         'hash': 'a', 'bytes': '1'},
-                        {'name': '/deltest/submanifest', 'sub_slo': True,
-                         'hash': 'submanifest-etag',
-                         'bytes': len(_submanifest_data)},
-                        {'name': '/deltest/d_3',
-                         'hash': 'd', 'bytes': '3'}]))
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest/manifest-with-submanifest',
-            swob.HTTPNoContent, {}, None)
-
-        self.app.register(
-            'GET', '/v1/AUTH_test/deltest/submanifest',
-            swob.HTTPOk, {'Content-Type': 'application/json',
-                          'X-Static-Large-Object': 'true'},
-            _submanifest_data)
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest/submanifest',
-            swob.HTTPNoContent, {}, None)
-
-        self.app.register(
-            'GET', '/v1/AUTH_test/deltest/manifest-missing-submanifest',
-            swob.HTTPOk, {'Content-Type': 'application/json',
-                          'X-Static-Large-Object': 'true'},
-            json.dumps([{'name': '/deltest/a_1', 'hash': 'a', 'bytes': '1'},
-                        {'name': '/deltest/missing-submanifest',
-                         'hash': 'a', 'bytes': '2', 'sub_slo': True},
-                        {'name': '/deltest/d_3', 'hash': 'd', 'bytes': '3'}]))
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest/manifest-missing-submanifest',
-            swob.HTTPNoContent, {}, None)
-
-        self.app.register(
-            'GET', '/v1/AUTH_test/deltest/missing-submanifest',
-            swob.HTTPNotFound, {}, None)
-
-        self.app.register(
-            'GET', '/v1/AUTH_test/deltest/manifest-badjson',
-            swob.HTTPOk, {'Content-Type': 'application/json',
-                          'X-Static-Large-Object': 'true'},
-            "[not {json (at ++++all")
-
-        self.app.register(
-            'GET', '/v1/AUTH_test/deltest/manifest-with-unauth-segment',
-            swob.HTTPOk, {'Content-Type': 'application/json',
-                          'X-Static-Large-Object': 'true'},
-            json.dumps([{'name': '/deltest/a_1', 'hash': 'a', 'bytes': '1'},
-                        {'name': '/deltest-unauth/q_17',
-                         'hash': '11', 'bytes': '17'}]))
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest/manifest-with-unauth-segment',
-            swob.HTTPNoContent, {}, None)
-
-        self.app.register(
-            'DELETE', '/v1/AUTH_test/deltest-unauth/q_17',
-            swob.HTTPUnauthorized, {}, None)
-
-    def call_app(self, req, app=None):
-        if app is None:
-            app = self.app
-
-        status = [None]
-        headers = [None]
-
-        def start_response(s, h, ei=None):
-            status[0] = s
-            headers[0] = h
-
-        body = ''.join(app(req.environ, start_response))
-        return status[0], headers[0], body
-
-    def call_slo(self, req):
-        return self.call_app(req, app=self.slo)
-
-    def test_handle_multipart_no_obj(self):
-        req = Request.blank('/')
-        resp_iter = self.slo(req.environ, fake_start_response)
-        self.assertEquals(self.app.calls, [('GET', '/')])
-        self.assertEquals(''.join(resp_iter), 'passed')
-
-    def test_slo_header_assigned(self):
-        req = Request.blank(
-            '/v1/a/c/o', headers={'x-static-large-object': "true"})
-        resp = self.slo(req.environ, fake_start_response)
-        self.assert_(
-            resp[0].startswith('X-Static-Large-Object is a reserved header'))
-
-    def test_parse_input(self):
-        self.assertRaises(HTTPException, slo.parse_input, 'some non json')
-        data = json.dumps(
-            [{'path': '/cont/object', 'etag': 'etagoftheobjecitsegment',
-              'size_bytes': 100}])
-        self.assertEquals('/cont/object',
-                          slo.parse_input(data)[0]['path'])
 
     def test_put_manifest_too_quick_fail(self):
         req = Request.blank('/v1/a/c/o')
@@ -460,9 +375,118 @@ class TestSloMiddleware(unittest.TestCase):
         self.assertEquals(errors[4][0], '/checktest/slob')
         self.assertEquals(errors[4][1], 'Etag Mismatch')
 
+
+class TestSloDeleteManifest(SloTestCase):
+
+    def setUp(self):
+        super(TestSloDeleteManifest, self).setUp()
+
+        _submanifest_data = json.dumps(
+            [{'name': '/deltest/b_2', 'hash': 'a', 'bytes': '1'},
+             {'name': '/deltest/c_3', 'hash': 'b', 'bytes': '2'}])
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/deltest/man_404',
+            swob.HTTPNotFound, {}, None)
+        self.app.register(
+            'GET', '/v1/AUTH_test/deltest/man',
+            swob.HTTPOk, {'Content-Type': 'application/json',
+                          'X-Static-Large-Object': 'true'},
+            json.dumps([{'name': '/deltest/gone', 'hash': 'a', 'bytes': '1'},
+                        {'name': '/deltest/b_2', 'hash': 'b', 'bytes': '2'}]))
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest/man',
+            swob.HTTPNoContent, {}, None)
+        self.app.register(
+            'GET', '/v1/AUTH_test/deltest/man-all-there',
+            swob.HTTPOk, {'Content-Type': 'application/json',
+                          'X-Static-Large-Object': 'true'},
+            json.dumps([{'name': '/deltest/b_2', 'hash': 'a', 'bytes': '1'},
+                        {'name': '/deltest/c_3', 'hash': 'b', 'bytes': '2'}]))
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest/gone',
+            swob.HTTPNotFound, {}, None)
+        self.app.register(
+            'GET', '/v1/AUTH_test/deltest/a_1',
+            swob.HTTPOk, {'Content-Length': '1'}, 'a')
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest/a_1',
+            swob.HTTPNoContent, {}, None)
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest/b_2',
+            swob.HTTPNoContent, {}, None)
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest/c_3',
+            swob.HTTPNoContent, {}, None)
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest/d_3',
+            swob.HTTPNoContent, {}, None)
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/deltest/manifest-with-submanifest',
+            swob.HTTPOk, {'Content-Type': 'application/json',
+                          'X-Static-Large-Object': 'true'},
+            json.dumps([{'name': '/deltest/a_1',
+                         'hash': 'a', 'bytes': '1'},
+                        {'name': '/deltest/submanifest', 'sub_slo': True,
+                         'hash': 'submanifest-etag',
+                         'bytes': len(_submanifest_data)},
+                        {'name': '/deltest/d_3',
+                         'hash': 'd', 'bytes': '3'}]))
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest/manifest-with-submanifest',
+            swob.HTTPNoContent, {}, None)
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/deltest/submanifest',
+            swob.HTTPOk, {'Content-Type': 'application/json',
+                          'X-Static-Large-Object': 'true'},
+            _submanifest_data)
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest/submanifest',
+            swob.HTTPNoContent, {}, None)
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/deltest/manifest-missing-submanifest',
+            swob.HTTPOk, {'Content-Type': 'application/json',
+                          'X-Static-Large-Object': 'true'},
+            json.dumps([{'name': '/deltest/a_1', 'hash': 'a', 'bytes': '1'},
+                        {'name': '/deltest/missing-submanifest',
+                         'hash': 'a', 'bytes': '2', 'sub_slo': True},
+                        {'name': '/deltest/d_3', 'hash': 'd', 'bytes': '3'}]))
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest/manifest-missing-submanifest',
+            swob.HTTPNoContent, {}, None)
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/deltest/missing-submanifest',
+            swob.HTTPNotFound, {}, None)
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/deltest/manifest-badjson',
+            swob.HTTPOk, {'Content-Type': 'application/json',
+                          'X-Static-Large-Object': 'true'},
+            "[not {json (at ++++all")
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/deltest/manifest-with-unauth-segment',
+            swob.HTTPOk, {'Content-Type': 'application/json',
+                          'X-Static-Large-Object': 'true'},
+            json.dumps([{'name': '/deltest/a_1', 'hash': 'a', 'bytes': '1'},
+                        {'name': '/deltest-unauth/q_17',
+                         'hash': '11', 'bytes': '17'}]))
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest/manifest-with-unauth-segment',
+            swob.HTTPNoContent, {}, None)
+
+        self.app.register(
+            'DELETE', '/v1/AUTH_test/deltest-unauth/q_17',
+            swob.HTTPUnauthorized, {}, None)
+
     def test_handle_multipart_delete_man(self):
         req = Request.blank(
-            '/v1/AUTH_test/c/man', environ={'REQUEST_METHOD': 'DELETE'})
+            '/v1/AUTH_test/deltest/man',
+            environ={'REQUEST_METHOD': 'DELETE'})
         self.slo(req.environ, fake_start_response)
         self.assertEquals(self.app.call_count, 1)
 
