@@ -61,7 +61,11 @@ class FakeSwift(object):
             resp_class, raw_headers, body = self._responses[(method, path)]
             headers = swob.HeaderKeyDict(raw_headers)
         except KeyError:
-            if method == 'GET' and obj and path in self.uploaded:
+            if method == 'HEAD' and ('GET', path) in self._responses:
+                resp_class, raw_headers, _ = self._responses[('GET', path)]
+                body = None
+                headers = swob.HeaderKeyDict(raw_headers)
+            elif method == 'GET' and obj and path in self.uploaded:
                 resp_class = swob.HTTPOk
                 headers, body = self.uploaded[path]
             else:
@@ -131,10 +135,11 @@ class TestSloMiddleware(SloTestCase):
 
     def test_slo_header_assigned(self):
         req = Request.blank(
-            '/v1/a/c/o', headers={'x-static-large-object': "true"})
-        resp = self.slo(req.environ, fake_start_response)
+            '/v1/a/c/o', headers={'x-static-large-object': "true"},
+            environ={'REQUEST_METHOD': 'PUT'})
+        resp = ''.join(self.slo(req.environ, fake_start_response))
         self.assert_(
-            resp[0].startswith('X-Static-Large-Object is a reserved header'))
+            resp.startswith('X-Static-Large-Object is a reserved header'))
 
     def test_parse_input(self):
         self.assertRaises(HTTPException, slo.parse_input, 'some non json')
@@ -627,6 +632,150 @@ class TestSloDeleteManifest(SloTestCase):
         self.assertEquals(resp_data['Number Not Found'], 0)
         self.assertEquals(resp_data['Errors'],
                           [['/deltest-unauth/q_17', '401 Unauthorized']])
+
+
+class TestSloGetManifest(SloTestCase):
+    def setUp(self):
+        super(TestSloGetManifest, self).setUp()
+
+        _bc_manifest_json = json.dumps(
+            [{'name': '/gettest/b_10', 'hash': 'b', 'bytes': '10',
+              'content_type': 'text/plain'},
+             {'name': '/gettest/c_15', 'hash': 'c', 'bytes': '15',
+              'content_type': 'text/plain'}])
+
+        # some plain old objects
+        self.app.register(
+            'GET', '/v1/AUTH_test/gettest/a_5',
+            swob.HTTPOk, {'Content-Length': '5',
+                          'Etag': 'a'},
+            'a' * 5)
+        self.app.register(
+            'GET', '/v1/AUTH_test/gettest/b_10',
+            swob.HTTPOk, {'Content-Length': '10',
+                          'Etag': 'b'},
+            'b' * 10)
+        self.app.register(
+            'GET', '/v1/AUTH_test/gettest/c_15',
+            swob.HTTPOk, {'Content-Length': '15',
+                          'Etag': 'c'},
+            'c' * 15)
+        self.app.register(
+            'GET', '/v1/AUTH_test/gettest/d_20',
+            swob.HTTPOk, {'Content-Length': '20',
+                          'Etag': 'd'},
+            'd' * 20)
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/gettest/manifest-bc',
+            swob.HTTPOk, {'Content-Type': 'application/json;swift_bytes=25',
+                          'X-Static-Large-Object': 'true',
+                          'X-Object-Meta-Plant': 'Ficus'},
+            _bc_manifest_json)
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/gettest/manifest-abcd',
+            swob.HTTPOk, {'Content-Type': 'application/json',
+                          'X-Static-Large-Object': 'true'},
+            json.dumps([{'name': '/gettest/a_5', 'hash': 'a',
+                         'content_type': 'text/plain', 'bytes': '5'},
+                        {'name': '/gettest/manifest-bc', 'sub_slo': True,
+                         'content_type': 'application/json;swift_bytes=25',
+                         'hash': 'manifest-bc',
+                         'bytes': len(_bc_manifest_json)},
+                        {'name': '/gettest/d_20', 'hash': 'd',
+                         'content_type': 'text/plain', 'bytes': '20'}]))
+
+        self.app.register(
+            'GET', '/v1/AUTH_test/gettest/manifest-badjson',
+            swob.HTTPOk, {'Content-Type': 'application/json',
+                          'X-Static-Large-Object': 'true',
+                          'X-Object-Meta-Fish': 'Bass'},
+            "[not {json (at ++++all")
+
+    def test_get_manifest_passthrough(self):
+        req = Request.blank(
+            '/v1/AUTH_test/gettest/manifest-bc?multipart-manifest=get',
+            environ={'REQUEST_METHOD': 'GET',
+                     'HTTP_ACCEPT': 'application/json'})
+        status, headers, body = self.call_slo(req)
+
+        self.assertEqual(status, '200 OK')
+        resp_data = json.loads(body)
+        self.assertEqual(
+            resp_data,
+            [{'hash': 'b', 'bytes': '10', 'name': '/gettest/b_10',
+              'content_type': 'text/plain'},
+             {'hash': 'c', 'bytes': '15', 'name': '/gettest/c_15',
+              'content_type': 'text/plain'}])
+
+    def test_get_nonmanifest_passthrough(self):
+        req = Request.blank(
+            '/v1/AUTH_test/gettest/a_5',
+            environ={'REQUEST_METHOD': 'GET'})
+        status, headers, body = self.call_slo(req)
+
+        self.assertEqual(status, '200 OK')
+        self.assertEqual(body, 'aaaaa')
+
+    def test_get_manifest(self):
+        req = Request.blank(
+            '/v1/AUTH_test/gettest/manifest-bc',
+            environ={'REQUEST_METHOD': 'GET'})
+        status, headers, body = self.call_slo(req)
+        headers = swob.HeaderKeyDict(headers)
+
+        manifest_etag = md5("bc").hexdigest()
+        self.assertEqual(status, '200 OK')
+        self.assertEqual(headers['Content-Length'], '25')
+        self.assertEqual(headers['Etag'], '"%s"' % manifest_etag)
+        self.assertEqual(headers['X-Object-Meta-Plant'], 'Ficus')
+        self.assertTrue("X-Static-Large-Object" not in headers)
+        self.assertEqual(body, 'bbbbbbbbbbccccccccccccccc')
+
+    def test_get_manifest_with_submanifest(self):
+        req = Request.blank(
+            '/v1/AUTH_test/gettest/manifest-abcd',
+            environ={'REQUEST_METHOD': 'GET'})
+        status, headers, body = self.call_slo(req)
+        headers = swob.HeaderKeyDict(headers)
+
+        manifest_etag = md5("a" + "manifest-bc" + "d").hexdigest()
+        self.assertEqual(status, '200 OK')
+        self.assertEqual(headers['Content-Length'], '50')
+        self.assertEqual(headers['Etag'], '"%s"' % manifest_etag)
+        self.assertTrue("X-Static-Large-Object" not in headers)
+        self.assertEqual(
+            body, 'aaaaabbbbbbbbbbcccccccccccccccdddddddddddddddddddd')
+
+    def test_range_get_manifest(self):
+        pass
+
+    def test_get_bogus_manifest(self):
+        req = Request.blank(
+            '/v1/AUTH_test/gettest/manifest-badjson',
+            environ={'REQUEST_METHOD': 'GET'})
+        status, headers, body = self.call_slo(req)
+        headers = swob.HeaderKeyDict(headers)
+
+        self.assertEqual(status, '200 OK')
+        self.assertEqual(headers['Content-Length'], '0')
+        self.assertEqual(headers['X-Object-Meta-Fish'], 'Bass')
+        self.assertEqual(body, '')
+
+    def test_head_manifest_is_efficient(self):
+        req = Request.blank(
+            '/v1/AUTH_test/gettest/manifest-abcd',
+            environ={'REQUEST_METHOD': 'HEAD'})
+        status, headers, body = self.call_slo(req)
+        headers = swob.HeaderKeyDict(headers)
+
+        manifest_etag = md5("a" + "manifest-bc" + "d").hexdigest()
+        self.assertEqual(status, '200 OK')
+        self.assertEqual(headers['Content-Length'], '50')
+        self.assertEqual(headers['Etag'], '"%s"' % manifest_etag)
+        self.assertTrue("X-Static-Large-Object" not in headers)
+        self.assertEqual(body, '')
 
 
 if __name__ == '__main__':

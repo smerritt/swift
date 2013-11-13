@@ -139,13 +139,15 @@ from cStringIO import StringIO
 from datetime import datetime
 import mimetypes
 from hashlib import md5
+from swift.common.exceptions import ListingIterError, ListingIterNotFound
 from swift.common.swob import Request, HTTPBadRequest, HTTPServerError, \
     HTTPMethodNotAllowed, HTTPRequestEntityTooLarge, HTTPLengthRequired, \
     HTTPOk, HTTPPreconditionFailed, HTTPException, HTTPNotFound, \
     HTTPUnauthorized
-from swift.common.utils import json, get_logger, config_true_value
+from swift.common.utils import json, get_logger, config_true_value, \
+    get_valid_utf8_str, override_bytes_from_content_type, split_path
 from swift.common.constraints import check_utf8, MAX_BUFFERED_SLO_SEGMENTS
-from swift.common.http import HTTP_NOT_FOUND, HTTP_UNAUTHORIZED
+from swift.common.http import HTTP_NOT_FOUND, HTTP_UNAUTHORIZED, is_success
 from swift.common.wsgi import WSGIContext
 from swift.common.middleware.bulk import get_response_body, \
     ACCEPTABLE_FORMATS, Bulk
@@ -174,10 +176,10 @@ def parse_input(raw_data):
     return parsed_data
 
 
-class SloContext(WSGIContext):
+class SloPutContext(WSGIContext):
 
     def __init__(self, slo, slo_etag):
-        WSGIContext.__init__(self, slo.app)
+        super(SloPutContext, self).__init__(slo.app)
         self.slo_etag = '"' + slo_etag.hexdigest() + '"'
 
     def handle_slo_put(self, req, start_response):
@@ -192,6 +194,145 @@ class SloContext(WSGIContext):
                        self._response_headers,
                        self._response_exc_info)
         return app_resp
+
+
+class SloGetContext(WSGIContext):
+
+    max_slo_recursion_depth = 10
+
+    def __init__(self, slo):
+        self.slo = slo
+        super(SloGetContext, self).__init__(slo.app)
+
+    def _fetch_sub_slo_segments(self, req, version, acc, con, obj):
+        """
+        Fetch the submanifest, parse it, and return it.
+        Raise exception on failures.
+
+        """
+        sub_req = req.copy_get()
+        sub_req.range = None
+        sub_req.path_info = '/'.join(['', version, acc, con, obj])
+        sub_resp = sub_req.get_response(self.slo.app)
+
+        if sub_resp.status_int == HTTP_NOT_FOUND:
+            raise ListingIterNotFound()
+        elif not is_success(sub_resp.status_int):
+            raise ListingIterError()
+
+        try:
+            return json.loads(''.join(sub_resp.app_iter))
+        except ValueError:
+            raise ListingIterError()
+
+    def _segment_listing_iterator(self, req, version, account, segments,
+                                  recursion_depth=0):
+        if recursion_depth > self.max_slo_recursion_depth:
+            raise ListingIterError("Max recursion depth exceeded")
+
+        for seg_dict in segments:
+            if config_true_value(seg_dict.get('sub_slo')):
+                sub_path = get_valid_utf8_str(seg_dict['name'])
+                sub_cont, sub_obj = split_path(sub_path, 2, 2, True)
+
+                sub_segments = self._fetch_sub_slo_segments(
+                    req, version, account, sub_cont, sub_obj)
+                for sub_seg_dict in self._segment_listing_iterator(
+                        req, version, account, sub_segments,
+                        recursion_depth=recursion_depth + 1):
+                    yield sub_seg_dict
+            else:
+                yield seg_dict
+        
+    def handle_slo_get_or_head(self, req, start_response):
+        """
+        Takes a request and a start_response callable and does the normal WSGI
+        thing with them. Returns an iterator suitable for sending up the WSGI
+        chain.
+
+        :param req: swob.Request object; is a GET or HEAD request aimed at
+                    what may be a static large object manifest (or may not).
+        :param start_response: WSGI start_response callable
+        """
+        resp_iter = self._app_call(req.environ)
+
+        # make sure this response is for a static large object manifest
+        for header, value in self._response_headers:
+            if (header.lower() == 'x-static-large-object' and
+                    config_true_value(value)):
+                break
+        else:
+            # Not a static large object manifest? Just pass it through.
+            start_response(self._response_status,
+                           self._response_headers,
+                           self._response_exc_info)
+            return resp_iter
+
+        # Just because a response shows that an object is a SLO manifest does
+        # not mean that response's body contains the entire SLO manifest. If
+        # it doesn't, we need to make a second request to actually get the
+        # manifest.
+        #
+        # XXX something something range requests
+        if req.method == 'HEAD':
+            get_req = req.copy_get()
+            resp_iter = self._app_call(get_req.environ)
+
+        try:
+            segments = json.loads(''.join(resp_iter))
+        except ValueError:
+            segments = []
+
+        etag = md5()
+        content_length = 0
+        for seg_dict in segments:
+            etag.update(seg_dict['hash'])
+
+            if config_true_value(seg_dict.get('sub_slo')):
+                override_bytes_from_content_type(
+                    seg_dict, logger=self.slo.logger)
+            content_length += int(seg_dict['bytes'])
+        
+        response_headers = [(h, v) for h, v in self._response_headers
+                            if h.lower() not in ('etag', 'content-length',
+                                                 'x-static-large-object')]
+        response_headers.append(('Content-Length', str(content_length)))
+        response_headers.append(('Etag', '"%s"' % etag.hexdigest()))
+
+        if req.method == 'HEAD':
+            return self._manifest_head_response(
+                req, response_headers, segments, start_response)
+        else:
+            return self._manifest_get_response(
+                req, response_headers, segments, start_response)
+            
+
+    def _manifest_head_response(self, req, response_headers, segments,
+                                start_response):
+        start_response('200 OK', response_headers)
+        yield ''
+            
+    def _manifest_get_response(self, req, response_headers, segments,
+                               start_response):
+        ver, account, _junk = req.split_path(3, 3, rest_with_last=True)
+        have_yielded_data = False
+        for seg_dict in self._segment_listing_iterator(
+                req, ver, account, segments):
+            seg_req = req.copy_get()
+            seg_req.environ['PATH_INFO'] = "/{ver}/{acc}/{conobj}".format(
+                ver=ver, acc=account, conobj=seg_dict['name'].lstrip('/'))
+            seg_resp = seg_req.get_response(self.app)
+            # XXX check success, ffs
+            for chunk in seg_resp.app_iter:
+                if not have_yielded_data:
+                    start_response('200 OK', response_headers)
+                if chunk:
+                    have_yielded_data = True
+                    yield chunk
+        else:
+            # No segments --> either an empty SLO manifest, or a broken one.
+            start_response('200 OK', response_headers)
+            yield ''
 
 
 class StaticLargeObject(object):
@@ -218,6 +359,20 @@ class StaticLargeObject(object):
         self.min_segment_size = int(self.conf.get('min_segment_size',
                                     1024 * 1024))
         self.bulk_deleter = Bulk(app, {})
+
+    def handle_multipart_get_or_head(self, req, start_response):
+        """
+        Handles the GET or HEAD of a SLO manifest.
+
+        The response body (only on GET, of course) will consist of the
+        concatenation of the segments.
+
+        :params req: a swob.Request with a path referencing an object
+        :raises: HttpException on errors
+        """
+
+        slo_get_context = SloGetContext(self)
+        return slo_get_context.handle_slo_get_or_head(req, start_response)
 
     def handle_multipart_put(self, req, start_response):
         """
@@ -325,8 +480,8 @@ class StaticLargeObject(object):
         env['CONTENT_LENGTH'] = str(len(json_data))
         env['wsgi.input'] = StringIO(json_data)
 
-        slo_context = SloContext(self, slo_etag)
-        return slo_context.handle_slo_put(req, start_response)
+        slo_put_context = SloPutContext(self, slo_etag)
+        return slo_put_context.handle_slo_put(req, start_response)
 
     def get_segments_to_delete_iter(self, req):
         """
@@ -446,6 +601,11 @@ class StaticLargeObject(object):
                         req.params.get('multipart-manifest') == 'delete':
                     return self.handle_multipart_delete(req)(env,
                                                              start_response)
+                if ((req.method == 'GET' or req.method == 'HEAD') and
+                        req.params.get('multipart-manifest') != 'get'):
+                    return self.handle_multipart_get_or_head(req,
+                                                             start_response)
+
                 if 'X-Static-Large-Object' in req.headers:
                     raise HTTPBadRequest(
                         request=req,
