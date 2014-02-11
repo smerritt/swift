@@ -1011,6 +1011,39 @@ class TestContainerController(unittest.TestCase):
         resp = req.get_response(self.controller)
         self.assertEquals(resp.status_int, 404)
 
+    def test_change_storage_policy_via_DELETE_then_PUT(self):
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': '100',
+                     'X-Storage-Policy-Index': '1'})
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.status_int, 201)  # sanity check
+
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'DELETE'},
+            headers={'X-Timestamp': '200'})
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.status_int, 204)  # sanity check
+
+        # at this point, the DB should still exist but be in a deleted state,
+        # so changing the policy index is perfectly acceptable
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'PUT'},
+            headers={'X-Timestamp': '300',
+                     'X-Storage-Policy-Index': '2'})
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.status_int, 201)  # sanity check
+
+        req = Request.blank(
+            '/sda1/p/a/c',
+            environ={'REQUEST_METHOD': 'HEAD'},
+            headers={'X-Timestamp': '400'})
+        resp = req.get_response(self.controller)
+        self.assertEqual(resp.headers['X-Storage-Policy-Index'], '2')
+
     def test_DELETE_object(self):
         req = Request.blank(
             '/sda1/p/a/c',
