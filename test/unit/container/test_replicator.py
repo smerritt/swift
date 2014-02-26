@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import unittest
+from ConfigParser import ConfigParser
+from test.unit import patch_policies
 from swift.container import replicator
 from swift.common.utils import normalize_timestamp
+from swift.common.storage_policy import StoragePolicy, parse_storage_policies
 
 
 class TestReplicator(unittest.TestCase):
@@ -54,6 +57,32 @@ class TestReplicator(unittest.TestCase):
         self.assertFalse(repl.report_up_to_date(info))
         info['reported_put_timestamp'] = normalize_timestamp(3)
         self.assertTrue(repl.report_up_to_date(info))
+
+    def test_sync_args(self):
+        repl = replicator.ContainerReplicator({})
+        replication_info = {
+            'max_row': '_max_row', 'hash': '_hash', 'id': '_id',
+            'created_at': '_created_at', 'put_timestamp': '_put_timestamp',
+            'delete_timestamp': '_delete_timestamp', 'metadata': '_metadata',
+            'storage_policy_index': '_storage_policy_index',
+            'otherstuff': '_otherstuff'}
+
+        # simulate cluster without storage policies
+        pols = parse_storage_policies(ConfigParser())
+        with patch_policies(pols):
+            sync_args = repl.sync_args_from_replication_info(replication_info)
+            self.assertEqual(sync_args, [
+                '_max_row', '_hash', '_id', '_created_at', '_put_timestamp',
+                '_delete_timestamp', '_metadata'])
+
+        # with some storage policies defined, we send the policy index
+        pols = [StoragePolicy(0, 'zero'),
+                StoragePolicy(1, 'one', is_default=True)]
+        with patch_policies(pols):
+            sync_args = repl.sync_args_from_replication_info(replication_info)
+            self.assertEqual(sync_args, [
+                '_max_row', '_hash', '_id', '_created_at', '_put_timestamp',
+                '_delete_timestamp', '_metadata', '_storage_policy_index'])
 
 
 if __name__ == '__main__':

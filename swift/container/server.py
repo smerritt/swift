@@ -47,6 +47,26 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPConflict, \
 DATADIR = 'containers'
 
 
+class ContainerReplicatorRpc(ReplicatorRpc):
+    """
+    Handle the container-specific parts of REPLICATE calls
+    """
+
+    def sync(self, borker, args):
+        try:
+            storage_policy_index = int(args[7])
+        except IndexError:
+            storage_policy_index = 0
+
+        # XXX this is where the magic goes
+        #
+        # if we're the loser in the policy-waving contest, we need to enqueue
+        # all our object rows in some queue somewhere. if we're the winner, we
+        # need to send a message back to the caller (somehow) that makes
+        # *them* enqueue all *their* rows.
+        return super(ContainerReplicatorRpc, self).sync(borker, args)
+
+
 class ContainerController(object):
     """WSGI Controller for the container server."""
 
@@ -77,7 +97,7 @@ class ContainerController(object):
             h.strip()
             for h in conf.get('allowed_sync_hosts', '127.0.0.1').split(',')
             if h.strip()]
-        self.replicator_rpc = ReplicatorRpc(
+        self.replicator_rpc = ContainerReplicatorRpc(
             self.root, DATADIR, ContainerBroker, self.mount_check,
             logger=self.logger)
         self.auto_create_account_prefix = \

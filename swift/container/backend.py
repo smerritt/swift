@@ -295,6 +295,17 @@ class ContainerBroker(DatabaseBroker):
             data = dict(data)
             return data
 
+    def get_replication_info(self, missing_column_defaults=None):
+        """
+        Get information about the DB required for replication.
+
+        Does what the superclass does, but adds in a default of
+        storage_policy_index=0 to the result.
+        """
+        super_dfl = dict(missing_column_defaults or {})
+        super_dfl.setdefault('storage_policy_index', 0)
+        return super(ContainerBroker, self).get_replication_info(super_dfl)
+
     def set_x_container_sync_points(self, sync_point1, sync_point2):
         with self.get() as conn:
             orig_isolation_level = conn.isolation_level

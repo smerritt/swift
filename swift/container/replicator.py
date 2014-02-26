@@ -16,6 +16,7 @@
 from swift.container import server as container_server
 from swift.container.backend import ContainerBroker
 from swift.common import db_replicator
+from swift.common.storage_policy import POLICIES
 
 
 class ContainerReplicator(db_replicator.Replicator):
@@ -30,3 +31,18 @@ class ContainerReplicator(db_replicator.Replicator):
             if full_info['reported_' + key] != full_info[key]:
                 return False
         return True
+
+    def sync_args_from_replication_info(self, replication_info):
+        sync_args = super(ContainerReplicator, self).\
+            sync_args_from_replication_info(replication_info)
+        # If we only have one storage policy, we're in a cluster that isn't
+        # using storage policies yet, so we don't send our policy index. The
+        # other end is either running new code that will infer a 0 from the
+        # policy index's absence *or* is running old code that will blow up if
+        # fed a policy index.
+        #
+        # The point is to keep container replication working during an upgrade
+        # from pre-storage-policy code to post-storage-policy code.
+        if len(POLICIES) > 1:
+            sync_args.append(replication_info['storage_policy_index'])
+        return sync_args
