@@ -1084,6 +1084,16 @@ class TestContainerBroker(unittest.TestCase):
         broker.initialize(normalize_timestamp('1'), 0)
         broker.set_storage_policy_index(2)
 
+    def test_storage_policy_index_in_replication_info(self):
+        broker = ContainerBroker(':memory:', account='a', container='c')
+        broker.initialize(normalize_timestamp('1'), 0)
+        self.assertEqual(
+            0, broker.get_replication_info().get('storage_policy_index'))
+
+        broker.set_storage_policy_index(4931)
+        self.assertEqual(
+            4931, broker.get_replication_info().get('storage_policy_index'))
+
 
 def premetadata_create_container_stat_table(self, conn, put_timestamp=None,
                                             _spi=None):
