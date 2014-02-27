@@ -367,10 +367,7 @@ class Replicator(Daemon):
                 _('ERROR Unable to connect to remote server: %s'), node)
             return False
         with Timeout(self.node_timeout):
-            response = http.replicate(
-                'sync', info['max_row'], info['hash'], info['id'],
-                info['created_at'], info['put_timestamp'],
-                info['delete_timestamp'], info['metadata'])
+            response = http.replicate('sync', info)
         if not response:
             return False
         elif response.status == HTTP_NOT_FOUND:  # completely missing, rsync
@@ -597,8 +594,19 @@ class ReplicatorRpc(object):
             return getattr(self, op)(self.broker_class(db_file), args)
 
     def sync(self, broker, args):
-        (remote_sync, hash_, id_, created_at, put_timestamp,
-         delete_timestamp, metadata) = args
+        if isinstance(args[0], dict):
+            remote_sync = args[0]['max_row']
+            hash_ = args[0]['hash']
+            id_ = args[0]['id']
+            created_at = args[0]['created_at']
+            put_timestamp = args[0]['put_timestamp']
+            delete_timestamp = args[0]['delete_timestamp']
+            metadata = args[0]['metadata']
+        else:
+            # This is only here for compatibility on upgrade (old code passed
+            # these as an array) and can be removed at some future point
+            (remote_sync, hash_, id_, created_at, put_timestamp,
+             delete_timestamp, metadata) = args
         timemark = time.time()
         try:
             info = broker.get_replication_info()

@@ -47,6 +47,36 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPConflict, \
 DATADIR = 'containers'
 
 
+class ContainerReplicatorRpc(ReplicatorRpc):
+    """
+    Handle the container-specific parts of REPLICATE calls
+    """
+
+    def sync(self, borker, args):
+        if isinstance(args[0], dict):
+            remote_sync = args[0]['max_row']
+            hash_ = args[0]['hash']
+            id_ = args[0]['id']
+            created_at = args[0]['created_at']
+            put_timestamp = args[0]['put_timestamp']
+            delete_timestamp = args[0]['delete_timestamp']
+            metadata = args[0]['metadata']
+            storage_policy_index = args[0]['storage_policy_index']
+        else:
+            # This is only here for compatibility on upgrade (old code passed
+            # these as an array) and can be removed at some future point
+            (remote_sync, hash_, id_, created_at, put_timestamp,
+             delete_timestamp, metadata) = args
+            storage_policy_index = 0
+        # XXX this is where the magic goes
+        #
+        # if we're the loser in the policy-waving contest, we need to enqueue
+        # all our object rows in some queue somewhere. if we're the winner, we
+        # need to send a message back to the caller (somehow) that makes
+        # *them* enqueue all *their* rows.
+        return super(ContainerReplicatorRpc, self).sync(borker, args)
+
+
 class ContainerController(object):
     """WSGI Controller for the container server."""
 
@@ -76,7 +106,7 @@ class ContainerController(object):
             h.strip()
             for h in conf.get('allowed_sync_hosts', '127.0.0.1').split(',')
             if h.strip()]
-        self.replicator_rpc = ReplicatorRpc(
+        self.replicator_rpc = ContainerReplicatorRpc(
             self.root, DATADIR, ContainerBroker, self.mount_check,
             logger=self.logger)
         self.auto_create_account_prefix = \
