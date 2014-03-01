@@ -245,6 +245,28 @@ class TestReconciler(unittest.TestCase):
         self.assertEqual(self.reconciler.stats['misplaced_objects'], 2)
         self.assertEqual(self.reconciler.stats['correct_objects'], 1)
 
+    def test_object_move(self):
+        self._mock_listing({
+            "/.misplaced_objects/3600/1:/AUTH_bob/c/o1": 3618.841878,
+        })
+        dest_response = (swob.HTTPNotFound, {}, '')
+        headers = {
+            'X-Timestamp': '3618.841878',
+        }
+        real_response = (swob.HTTPOk, headers, '')
+        responses = [dest_response, real_response]
+        self.reconciler.swift.app.register_responses(
+            'GET', '/v1/AUTH_bob/c/o1', responses)
+        self.reconciler.swift.app.register(
+            'PUT', '/v1/AUTH_bob/c/o1', swob.HTTPCreated, {}, '')
+        self._mock_oldest_spi({'c': 0})
+        self._run_once()
+        self.assertEqual(self.reconciler.stats['misplaced_objects'], 1)
+        self.assertEqual(self.reconciler.stats['unhandled_errors'], 0)
+
+        self.maxDiff = None
+        self.assertEqual(self.reconciler.swift.app.calls_with_headers, [])
+
 
 if __name__ == '__main__':
     unittest.main()

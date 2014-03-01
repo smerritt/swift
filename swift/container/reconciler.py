@@ -145,6 +145,7 @@ class ContainerReconciler(Daemon):
                              account, container, obj, err)
             return False
         except Exception:
+            self.stats['unhandled_errors'] += 1
             self.logger.exception("Unhandled error while copying /%s/%s/%s to "
                                   "the right place", account, container, obj)
             return False
