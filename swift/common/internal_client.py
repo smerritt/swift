@@ -185,7 +185,8 @@ class InternalClient(object):
             raise exc_type(*exc_value.args), None, exc_traceback
 
     def _get_metadata(
-            self, path, metadata_prefix='', acceptable_statuses=(2,)):
+            self, path, metadata_prefix='', acceptable_statuses=(2,),
+            headers=None):
         """
         Gets metadata by doing a HEAD on a path and using the metadata_prefix
         to get values from the headers returned.
@@ -196,6 +197,7 @@ class InternalClient(object):
                                 keys in the dict returned.  Defaults to ''.
         :param acceptable_statuses: List of status for valid responses,
                                     defaults to (2,).
+        :param headers: extra headers to send
 
         :returns : A dict of metadata with metadata_prefix stripped from keys.
                    Keys will be lowercase.
@@ -206,8 +208,10 @@ class InternalClient(object):
                            unexpected way.
         """
 
-        resp = self.make_request('HEAD', path, {}, acceptable_statuses)
-        if not resp.status_int // 100 == 2:
+        headers = headers or {}
+        resp = self.make_request('HEAD', path, headers, acceptable_statuses)
+        if resp.status_int in acceptable_statuses or \
+                resp.status_int // 100 in acceptable_statuses:
             return {}
         metadata_prefix = metadata_prefix.lower()
         metadata = {}
@@ -560,7 +564,7 @@ class InternalClient(object):
 
     def get_object_metadata(
             self, account, container, obj, metadata_prefix='',
-            acceptable_statuses=(2,)):
+            acceptable_statuses=(2,), headers=None):
         """
         Gets object metadata.
 
@@ -572,6 +576,7 @@ class InternalClient(object):
                                 keys in the dict returned.  Defaults to ''.
         :param acceptable_statuses: List of status for valid responses,
                                     defaults to (2,).
+        :param headers: extra headers to send with request
 
         :returns : Dict of object metadata.
 
@@ -582,7 +587,19 @@ class InternalClient(object):
         """
 
         path = self.make_path(account, container, obj)
-        return self._get_metadata(path, metadata_prefix, acceptable_statuses)
+        return self._get_metadata(path, metadata_prefix, acceptable_statuses,
+                                  headers=headers)
+
+    def get_object(self, account, container, obj, headers,
+                        acceptable_statuses=(2,)):
+        """
+        Returns a 3-tuple (status, headers, iterator of object body)
+        """
+
+        headers = headers or {}
+        path = self.make_path(account, container, obj)
+        resp = self.make_request('GET', path, headers, acceptable_statuses)
+        return (resp.status_int, resp.headers, resp.app_iter)
 
     def iter_object_lines(
             self, account, container, obj, headers=None,

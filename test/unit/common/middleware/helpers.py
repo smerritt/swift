@@ -20,6 +20,7 @@ from hashlib import md5
 from swift.common import swob
 from swift.common.utils import split_path
 
+from test.unit import FakeLogger, FakeRing
 
 class FakeSwift(object):
     """
@@ -33,6 +34,10 @@ class FakeSwift(object):
         self.uploaded = {}
         # mapping of (method, path) --> (response class, headers, body)
         self._responses = {}
+        self.logger = FakeLogger('fake-swift')
+        self.account_ring = FakeRing()
+        self.container_ring = FakeRing()
+        self.object_ring = FakeRing()
 
     def __call__(self, env, start_response):
         method = env['REQUEST_METHOD']
@@ -96,5 +101,5 @@ class FakeSwift(object):
     def call_count(self):
         return len(self._calls)
 
-    def register(self, method, path, response_class, headers, body):
+    def register(self, method, path, response_class, headers, body=''):
         self._responses[(method, path)] = (response_class, headers, body)

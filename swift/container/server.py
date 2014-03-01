@@ -53,21 +53,15 @@ class ContainerReplicatorRpc(ReplicatorRpc):
     """
 
     def sync(self, borker, args):
-        if isinstance(args[0], dict):
-            remote_sync = args[0]['max_row']
-            hash_ = args[0]['hash']
-            id_ = args[0]['id']
-            created_at = args[0]['created_at']
-            put_timestamp = args[0]['put_timestamp']
-            delete_timestamp = args[0]['delete_timestamp']
-            metadata = args[0]['metadata']
-            storage_policy_index = args[0]['storage_policy_index']
-        else:
-            # This is only here for compatibility on upgrade (old code passed
-            # these as an array) and can be removed at some future point
-            (remote_sync, hash_, id_, created_at, put_timestamp,
-             delete_timestamp, metadata) = args
-            storage_policy_index = 0
+        remote_sync = args[0]['max_row']
+        hash_ = args[0]['hash']
+        id_ = args[0]['id']
+        created_at = args[0]['created_at']
+        put_timestamp = args[0]['put_timestamp']
+        delete_timestamp = args[0]['delete_timestamp']
+        metadata = args[0]['metadata']
+        storage_policy_index = args[0]['storage_policy_index']
+
         # XXX this is where the magic goes
         #
         # if we're the loser in the policy-waving contest, we need to enqueue

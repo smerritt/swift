@@ -899,6 +899,43 @@ class TestObjectController(unittest.TestCase):
         check_file(2, 'c2', ['sda1', 'sdb1', 'sdc1', 'sdd1'], False)
 
     @unpatch_policies
+    def test_policy_IO_override(self):
+        if hasattr(_test_servers[-1], '_filesystem'):
+            # ironically, the _filesystem attribute on the object server means
+            # the in-memory diskfile is in use, so this test does not apply
+            return
+
+        prosrv = _test_servers[0]
+
+        # check overrides: put it in policy 2 (not where the container says)
+        partition, nodes = prosrv.get_object_ring(2).get_nodes(
+            'a', 'c1', 'wrong-o')
+        conf = {'devices': _testdir, 'mount_check': 'false'}
+        df_mgr = diskfile.DiskFileManager(conf, FakeLogger())
+        df = df_mgr.get_diskfile('sdc1', partition, 'a',
+                                 'c1', 'wrong-o', policy_idx=2)
+        with df.create() as writer:
+            writer.write("hello")
+            writer.put({'X-Timestamp': normalize_timestamp(time.time()),
+                        'ETag': md5("hello").hexdigest(),
+                        'Content-Length': 5})
+
+        req = Request.blank('/v1/a/c1/wrong-o',
+                            environ={'REQUEST_METHOD': 'GET'},
+                            headers={'Content-Type': 'text/plain'})
+        res = req.get_response(prosrv)
+        self.assertEqual(res.status_int, 404)  # sanity check
+
+        req = Request.blank('/v1/a/c1/wrong-o',
+                            environ={'REQUEST_METHOD': 'GET'},
+                            headers={'Content-Type': 'text/plain',
+                                     'X-Storage-Policy-Index-Override': '2'})
+
+        res = req.get_response(prosrv)
+        self.assertEqual(res.status_int, 200)
+        self.assertEqual(res.body, 'hello')
+
+    @unpatch_policies
     def test_GET_newest_large_file(self):
         prolis = _test_sockets[0]
         prosrv = _test_servers[0]
