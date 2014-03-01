@@ -62,7 +62,8 @@ class GetMetadataInternalClient(internal_client.InternalClient):
         self.get_metadata_called = 0
         self.metadata = 'some_metadata'
 
-    def _get_metadata(self, path, metadata_prefix, acceptable_statuses=None):
+    def _get_metadata(self, path, metadata_prefix, acceptable_statuses=None,
+                      headers=None):
         self.get_metadata_called += 1
         self.test.assertEquals(self.path, path)
         self.test.assertEquals(self.metadata_prefix, metadata_prefix)
@@ -839,6 +840,24 @@ class TestInternalClient(unittest.TestCase):
         for line in client.iter_object_lines('account', 'container', 'object'):
             ret_lines.append(line)
         self.assertEquals(lines, ret_lines)
+
+    def test_get_metadata_extra_headers(self):
+        class InternalClient(internal_client.InternalClient):
+            def __init__(self):
+                self.app = self.fake_app
+                self.user_agent = 'some_agent'
+                self.request_tries = 3
+
+            def fake_app(self, env, start_response):
+                self.req_env = env
+                start_response('200 Ok', [('Content-Length', '0')])
+                return []
+
+        client = InternalClient()
+        headers = {'X-Foo': 'bar'}
+        client.get_object_metadata('account', 'container', 'obj',
+                                   headers=headers)
+        self.assertEqual(client.req_env['HTTP_X_FOO'], 'bar')
 
     def test_iter_object_lines_compressed_object(self):
         class InternalClient(internal_client.InternalClient):
