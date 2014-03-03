@@ -899,9 +899,14 @@ class TestDBReplicator(unittest.TestCase):
         self._patch(patch.object, db_replicator, 'quarantine_db',
                     mock_quarantine_db)
 
-        response = rpc.sync(broker, ('remote_sync', 'hash_', 'id_',
-                                     'created_at', 'put_timestamp',
-                                     'delete_timestamp', 'metadata'))
+        response = rpc.sync(broker, [{
+            'max_row': 'remote_sync',
+            'hash': 'hash_',
+            'id': 'id_',
+            'created_at': 'created_at',
+            'put_timestamp': 'put_timestamp',
+            'delete_timestamp': 'delete_timestamp',
+            'metadata': '{"meta1": "data1", "meta2": "data2"}'}])
 
         self.assertEquals('404 Not Found', response.status)
         self.assertEquals(404, response.status_int)
@@ -910,10 +915,14 @@ class TestDBReplicator(unittest.TestCase):
         rpc = db_replicator.ReplicatorRpc('/', '/', FakeBroker, False)
         broker = FakeBroker()
 
-        response = rpc.sync(broker, (broker.get_sync() + 1, 12345, 'id_',
-                                     'created_at', 'put_timestamp',
-                                     'delete_timestamp',
-                                     '{"meta1": "data1", "meta2": "data2"}'))
+        response = rpc.sync(broker, [{
+            'max_row': broker.get_sync() + 1,
+            'hash': 12345,
+            'id': 'id_',
+            'created_at': 'created_at',
+            'put_timestamp': 'put_timestamp',
+            'delete_timestamp': 'delete_timestamp',
+            'metadata': '{"meta1": "data1", "meta2": "data2"}'}])
 
         self.assertEquals({'meta1': 'data1', 'meta2': 'data2'},
                           broker.metadata)

@@ -41,8 +41,15 @@ def parse_raw_obj(obj_info):
     }
 
 
-def get_oldest_storage_policy_index(container_ring, account_name,
-                                    container_name):
+def direct_get_oldest_storage_policy_index(container_ring, account_name,
+                                           container_name):
+    """
+    Talk directly to the primary container servers to figure out the storage
+    policy index for a given container. In case of disagreement, the oldest
+    container is considered correct.
+
+    :returns: storage policy index, or None if it couldn't get a quorum
+    """
     def _eat_client_exception(*args):
         try:
             return direct_head_container(*args)
@@ -91,7 +98,7 @@ class ContainerReconciler(Daemon):
 
     def ensure_object_in_right_location(self, real_storage_policy_index,
                                         account, container, obj, q_timestamp):
-        dest_storage_policy_index = get_oldest_storage_policy_index(
+        dest_storage_policy_index = direct_get_oldest_storage_policy_index(
             self.swift.app.container_ring, account, container)
         if dest_storage_policy_index == real_storage_policy_index:
             self.stats['correct_objects'] += 1

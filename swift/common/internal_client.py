@@ -210,8 +210,8 @@ class InternalClient(object):
 
         headers = headers or {}
         resp = self.make_request('HEAD', path, headers, acceptable_statuses)
-        if resp.status_int in acceptable_statuses or \
-                resp.status_int // 100 in acceptable_statuses:
+        if resp.status_int not in acceptable_statuses and \
+                resp.status_int // 100 not in acceptable_statuses:
             return {}
         metadata_prefix = metadata_prefix.lower()
         metadata = {}
