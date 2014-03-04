@@ -105,6 +105,10 @@ class FakeSwift(object):
         return [(method, path) for method, path, headers in self._calls]
 
     @property
+    def headers(self):
+        return [headers for method, path, headers in self._calls]
+
+    @property
     def calls_with_headers(self):
         return self._calls
 

@@ -95,33 +95,6 @@ class FakeInternalClient(reconciler.InternalClient):
                               swob.HTTPOk, account_headers,
                               json.dumps([]))
 
-    """
-    def iter_containers(self, account_name):
-        return ({'name': c} for c in sorted(self.accounts[account_name]))
-
-    def iter_objects(self, account_name, container_name):
-        for obj, timestamp in self.accounts[account_name][container_name]:
-            yield {
-                'name': obj,
-                'timestamp': timestamp,
-            }
-
-    def get_object_metadata(self, account, container, obj, headers=None,
-                            acceptable_statuses=(2,)):
-        for item in self.iter_objects(account, container):
-            if item['name'] == obj:
-                return item
-        raise Exception("couldn't find /%s/%s/%s" % (account, container, obj))
-
-    def get_object(self, account, container, obj, headers=None,
-                   acceptable_statuses=(2,)):
-        pass
-
-    def upload_object(self, fobj, account, container, obj, headers=None,
-                      acceptable_statuses=(2,)):
-        pass
-    """
-
 
 class TestReconcilerUtils(unittest.TestCase):
 
@@ -155,7 +128,7 @@ class TestReconcilerUtils(unittest.TestCase):
         ]
         with mock.patch(mock_path) as direct_head:
             direct_head.side_effect = stub_resp_headers
-            oldest_spi = reconciler.get_oldest_storage_policy_index(
+            oldest_spi = reconciler.direct_get_oldest_storage_policy_index(
                 self.fake_ring, 'a', 'con')
         self.assertEqual(oldest_spi, 0)
 
@@ -177,7 +150,7 @@ class TestReconcilerUtils(unittest.TestCase):
         ]
         with mock.patch(mock_path) as direct_head:
             direct_head.side_effect = stub_resp_headers
-            oldest_spi = reconciler.get_oldest_storage_policy_index(
+            oldest_spi = reconciler.direct_get_oldest_storage_policy_index(
                 self.fake_ring, 'a', 'con')
         self.assertEqual(oldest_spi, 1)
 
@@ -199,9 +172,13 @@ class TestReconcilerUtils(unittest.TestCase):
         ]
         with mock.patch(mock_path) as direct_head:
             direct_head.side_effect = stub_resp_headers
-            oldest_spi = reconciler.get_oldest_storage_policy_index(
+            oldest_spi = reconciler.direct_get_oldest_storage_policy_index(
                 self.fake_ring, 'a', 'con')
         self.assertEqual(oldest_spi, None)
+
+
+def listing_qs(marker):
+    return "?format=json&marker=%s&end_marker=" % urllib.quote(marker)
 
 
 class TestReconciler(unittest.TestCase):
@@ -223,9 +200,18 @@ class TestReconciler(unittest.TestCase):
     def _run_once(self):
         def mock_oldest_spi(ring, account, container_name):
             return self._mock_oldest_spi_map.get(container_name, 0)
-        with mock.patch.object(reconciler, 'get_oldest_storage_policy_index',
+
+        delete_listings_mock = mock.patch.object(
+            reconciler,
+            'direct_delete_container_entry')
+
+        with mock.patch.object(reconciler,
+                               'direct_get_oldest_storage_policy_index',
                                new=mock_oldest_spi):
-            self.reconciler.run_once()
+            with delete_listings_mock as dlm:
+                self.reconciler.run_once()
+        # XXX pay attention to deleted things
+        return dlm.mock_calls
 
     def test_stats(self):
         self._mock_listing({
@@ -250,22 +236,63 @@ class TestReconciler(unittest.TestCase):
             "/.misplaced_objects/3600/1:/AUTH_bob/c/o1": 3618.841878,
         })
         dest_response = (swob.HTTPNotFound, {}, '')
-        headers = {
-            'X-Timestamp': '3618.841878',
-        }
+        headers = {'X-Timestamp': '3618.841878'}
         real_response = (swob.HTTPOk, headers, '')
         responses = [dest_response, real_response]
         self.reconciler.swift.app.register_responses(
             'GET', '/v1/AUTH_bob/c/o1', responses)
         self.reconciler.swift.app.register(
             'PUT', '/v1/AUTH_bob/c/o1', swob.HTTPCreated, {}, '')
+        self.reconciler.swift.app.register(
+            'DELETE', '/v1/AUTH_bob/c/o1', swob.HTTPNoContent, {}, '')
         self._mock_oldest_spi({'c': 0})
         self._run_once()
         self.assertEqual(self.reconciler.stats['misplaced_objects'], 1)
         self.assertEqual(self.reconciler.stats['unhandled_errors'], 0)
 
         self.maxDiff = None
-        self.assertEqual(self.reconciler.swift.app.calls_with_headers, [])
+        self.assertEqual(
+            self.reconciler.swift.app.calls,
+            [('GET', '/v1/.misplaced_objects' + listing_qs('')),
+             ('GET', '/v1/.misplaced_objects/3600' + listing_qs('')),
+             ('HEAD', '/v1/AUTH_bob/c/o1'),
+             ('GET', '/v1/AUTH_bob/c/o1'),
+             ('PUT', '/v1/AUTH_bob/c/o1'),
+             ('DELETE', '/v1/AUTH_bob/c/o1'),
+             ('GET', '/v1/.misplaced_objects/3600' + listing_qs('1:/AUTH_bob/c/o1')),
+             ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
+
+        sent_headers = self.reconciler.swift.app.headers
+        self.assertEqual(
+            # the object *should be* in policy 0
+            sent_headers[2].get('X-Override-Storage-Policy-Index'), '0')
+        self.assertEqual(
+            # but the object *is* in policy 1
+            sent_headers[3].get('X-Override-Storage-Policy-Index'), '1')
+        self.assertEqual(
+            # so we PUT it into policy 0
+            sent_headers[4].get('X-Override-Storage-Policy-Index'), '0')
+        self.assertEqual(
+            # and DELETE it from policy 1
+            sent_headers[5].get('X-Override-Storage-Policy-Index'), '1')
+
+        # all the timestamps were preserved
+        self.assertEqual(
+            # this is the object's actual timestamp
+            sent_headers[4].get('X-Timestamp'), '3618.841878')
+        self.assertEqual(
+            # this is the timestamp when things were enqueued; by using this,
+            # we ensure we don't stomp an
+            sent_headers[5].get('X-Timestamp'), '3618.841878')
+
+    def test_object_move_newer_than_queue_entry(self):
+        pass
+
+    def test_object_move_older_than_queue_entry(self):
+        pass
+
+    def test_object_move_no_such_object(self):
+        pass
 
 
 if __name__ == '__main__':

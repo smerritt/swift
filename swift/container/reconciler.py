@@ -48,6 +48,9 @@ def direct_get_oldest_storage_policy_index(container_ring, account_name,
     policy index for a given container. In case of disagreement, the oldest
     container is considered correct.
 
+    :param container_ring: ring in which to look up the container locations
+    :param account_name: name of the container's account
+    :param container_name: name of the container
     :returns: storage policy index, or None if it couldn't get a quorum
     """
     def _eat_client_exception(*args):
@@ -69,8 +72,30 @@ def direct_get_oldest_storage_policy_index(container_ring, account_name,
     return int(headers[0]['x-storage-policy-index'])
 
 
+def direct_delete_container_entry(container_ring, account_name, container_name,
+                                  object_name):
+    """
+    Talk directly to the primary container servers to delete a particular
+    object listing. Does not talk to object servers; use this only when a
+    container entry does not actually have a corresponding object.
+
+    :param container_ring: ring in which to look up the container locations
+    :param account_name: name of the container's account
+    :param container_name: name of the container
+    :param object_name: name of the object
+    :returns: True on successful delete, False otherwise
+    """
+    # XXX write me
+    #
+    # we'll want to add a new method to direct_client and call it in a
+    # GreenPile like direct_get_oldest_storage_policy_index does
+    return True
+
+
 class ContainerReconciler(Daemon):
-    """Update container information in account listings."""
+    """
+    Move objects that are in the wrong storage policy.
+    """
 
     def __init__(self, conf):
         self.conf = conf
@@ -94,7 +119,11 @@ class ContainerReconciler(Daemon):
 
     def throw_tombstones(self, account, container, obj, timestamp,
                          storage_policy_index):
-        pass
+        headers = {'X-Timestamp': timestamp,
+                   'X-Override-Storage-Policy-Index': storage_policy_index}
+        self.swift.delete_object(account, container, obj,
+                                 headers=headers)
+
 
     def ensure_object_in_right_location(self, real_storage_policy_index,
                                         account, container, obj, q_timestamp):
@@ -141,7 +170,7 @@ class ContainerReconciler(Daemon):
 
         # move the object
         headers = real_obj_info.copy()
-        headers['X-Override-Storage-Policy-Index'] = real_storage_policy_index
+        headers['X-Override-Storage-Policy-Index'] = dest_storage_policy_index
 
         try:
             self.swift.upload_object(
