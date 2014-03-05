@@ -21,6 +21,7 @@ import unittest
 from contextlib import contextmanager, nested, closing
 from gzip import GzipFile
 from shutil import rmtree
+from StringIO import StringIO
 import gc
 import time
 from urllib import quote
@@ -43,7 +44,7 @@ from swift.obj import server as object_server
 from swift.common import ring
 from swift.common.middleware import proxy_logging
 from swift.common.middleware.acl import parse_acl, format_acl
-from swift.common.exceptions import ChunkReadTimeout
+from swift.common.exceptions import ChunkReadTimeout, DiskFileNotExist
 from swift.common.constraints import MAX_META_NAME_LENGTH, \
     MAX_META_VALUE_LENGTH, MAX_META_COUNT, MAX_META_OVERALL_SIZE, \
     MAX_FILE_SIZE, MAX_ACCOUNT_NAME_LENGTH, MAX_CONTAINER_NAME_LENGTH, \
@@ -908,24 +909,35 @@ class TestObjectController(unittest.TestCase):
         prosrv = _test_servers[0]
 
         # check overrides: put it in policy 2 (not where the container says)
-        partition, nodes = prosrv.get_object_ring(2).get_nodes(
+        req = Request.blank(
+            '/v1/a/c1/wrong-o',
+            environ={'REQUEST_METHOD': 'PUT',
+                     'wsgi.input': StringIO("hello")},
+            headers={'Content-Type': 'text/plain',
+                     'Content-Length': '5',
+                     'X-Storage-Policy-Index-Override': '2'})
+        res = req.get_response(prosrv)
+        self.assertEqual(res.status_int, 201)  # sanity check
+
+        # go to disk to make sure it's there
+        partition = prosrv.get_object_ring(2).get_part(
             'a', 'c1', 'wrong-o')
         conf = {'devices': _testdir, 'mount_check': 'false'}
         df_mgr = diskfile.DiskFileManager(conf, FakeLogger())
         df = df_mgr.get_diskfile('sdc1', partition, 'a',
                                  'c1', 'wrong-o', policy_idx=2)
-        with df.create() as writer:
-            writer.write("hello")
-            writer.put({'X-Timestamp': normalize_timestamp(time.time()),
-                        'ETag': md5("hello").hexdigest(),
-                        'Content-Length': 5})
+        with df.open():
+            contents = ''.join(df.reader())
+            self.assertEqual(contents, "hello")
 
+        # can't get it from the normal place
         req = Request.blank('/v1/a/c1/wrong-o',
                             environ={'REQUEST_METHOD': 'GET'},
                             headers={'Content-Type': 'text/plain'})
         res = req.get_response(prosrv)
         self.assertEqual(res.status_int, 404)  # sanity check
 
+        # but we can get it from policy 2
         req = Request.blank('/v1/a/c1/wrong-o',
                             environ={'REQUEST_METHOD': 'GET'},
                             headers={'Content-Type': 'text/plain',
@@ -934,6 +946,19 @@ class TestObjectController(unittest.TestCase):
         res = req.get_response(prosrv)
         self.assertEqual(res.status_int, 200)
         self.assertEqual(res.body, 'hello')
+
+        # and we can delete it the same way
+        req = Request.blank('/v1/a/c1/wrong-o',
+                            environ={'REQUEST_METHOD': 'DELETE'},
+                            headers={'Content-Type': 'text/plain',
+                                     'X-Storage-Policy-Index-Override': '2'})
+
+        res = req.get_response(prosrv)
+        self.assertEqual(res.status_int, 204)
+
+        df = df_mgr.get_diskfile('sdc1', partition, 'a',
+                                 'c1', 'wrong-o', policy_idx=2)
+        self.assertRaises(DiskFileNotExist, df.open)
 
     @unpatch_policies
     def test_GET_newest_large_file(self):
