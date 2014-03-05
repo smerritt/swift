@@ -193,6 +193,26 @@ class TestDirectClient(unittest.TestCase):
 
         direct_client.http_connect = was_http_connector
 
+    def test_direct_delete_container_object(self):
+        node = {'ip': '1.2.3.4', 'port': '6000', 'device': 'sda'}
+        part = '0'
+        account = 'a'
+        container = 'c'
+        obj = 'o'
+
+        was_http_connector = direct_client.http_connect
+        direct_client.http_connect = mock_http_connect(204)
+
+        direct_client.direct_delete_container_object(node, part, account,
+                                                     container, obj)
+
+        direct_client.http_connect = mock_http_connect(500)
+        self.assertRaises(ClientException,
+                          direct_client.direct_delete_container_object, node,
+                          part, account, container, obj)
+
+        direct_client.http_connect = was_http_connector
+
     def test_direct_head_object(self):
         node = {'ip': '1.2.3.4', 'port': '6000', 'device': 'sda'}
         part = '0'

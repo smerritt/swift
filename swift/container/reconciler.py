@@ -16,13 +16,17 @@
 import time
 from collections import defaultdict
 
-from eventlet import GreenPile
+from eventlet import GreenPile, GreenPool
 
 from swift.common.daemon import Daemon
 from swift.common.internal_client import InternalClient, UnexpectedResponse
 from swift.common.utils import get_logger, split_path, quorum_size, \
     FileLikeIter, last_modified_date_to_timestamp
 from swift.common.direct_client import direct_head_container, ClientException
+
+
+def slightly_later_timestamp(ts):
+    return ts + 0.000001
 
 
 def parse_raw_obj(obj_info):
@@ -73,23 +77,28 @@ def direct_get_oldest_storage_policy_index(container_ring, account_name,
 
 
 def direct_delete_container_entry(container_ring, account_name, container_name,
-                                  object_name):
+                                  object_name, headers=None):
     """
     Talk directly to the primary container servers to delete a particular
     object listing. Does not talk to object servers; use this only when a
     container entry does not actually have a corresponding object.
-
-    :param container_ring: ring in which to look up the container locations
-    :param account_name: name of the container's account
-    :param container_name: name of the container
-    :param object_name: name of the object
-    :returns: True on successful delete, False otherwise
     """
-    # XXX write me
-    #
-    # we'll want to add a new method to direct_client and call it in a
-    # GreenPile like direct_get_oldest_storage_policy_index does
-    return True
+
+    def _eat_client_exception(*args, **kwargs):
+        try:
+            return direct_delete_container_object(*args, **kwargs)
+        except ClientException:
+            pass
+
+    pool = GreenPool()
+    part, nodes = container_ring.get_nodes(account_name, container_name)
+    for node in nodes:
+        pool.spawn(_eat_client_exception, node, part, account_name,
+                   container_name, headers=headers)
+
+    # This either worked or it didn't; if it didn't, we'll retry on the next
+    # reconciler loop when we see the queue entry again.
+    pool.waitall()
 
 
 class ContainerReconciler(Daemon):
@@ -99,6 +108,8 @@ class ContainerReconciler(Daemon):
 
     def __init__(self, conf):
         self.conf = conf
+        self.reclaim_age = int(conf.get('reclaim_age', 86400 * 7))
+        self.interval = int(conf.get('interval', 300))
         conf_path = conf.get('__file__') or \
             '/etc/swift/container-reconciler.conf'
         self.logger = get_logger(conf, log_route='container-reconciler')
@@ -112,10 +123,13 @@ class ContainerReconciler(Daemon):
     def run_forever(self, *args, **kwargs):
         while True:
             self.run_once(*args, **kwargs)
-            time.sleep(0.1)
+            time.sleep(self.interval)
 
-    def pop_q(self, raw_obj):
-        pass
+    def pop_queue(self, container, obj, q_timestamp):
+        headers = {'X-Timestamp': slightly_later_timestamp(q_timestamp)}
+        direct_delete_container_entry(
+            self.swift.app.container_ring, self.misplaced_objects_account,
+            container, obj, headers=headers)
 
     def throw_tombstones(self, account, container, obj, timestamp,
                          storage_policy_index):
@@ -123,7 +137,6 @@ class ContainerReconciler(Daemon):
                    'X-Override-Storage-Policy-Index': storage_policy_index}
         self.swift.delete_object(account, container, obj,
                                  headers=headers)
-
 
     def ensure_object_in_right_location(self, real_storage_policy_index,
                                         account, container, obj, q_timestamp):
@@ -139,15 +152,15 @@ class ContainerReconciler(Daemon):
         dest_obj = self.swift.get_object_metadata(account, container, obj,
                                                   headers=headers,
                                                   acceptable_statuses=(2, 4))
-        dest_ts = float(dest_obj.get('X-Timestamp', '0'))
+        dest_ts = float(dest_obj.get('x-timestamp', '0.0'))
         if dest_ts >= q_timestamp:
             self.stats['newer_objects'] += 1
-            self.throw_tombstones(account, container, obj, q_timestamp,
+            self.throw_tombstones(account, container, obj,
+                                  slightly_later_timestamp(q_timestamp),
                                   real_storage_policy_index)
             return True
 
         # check if object is still available in the real
-        self.stats['misplaced_objects'] += 1
         headers = {
             'X-Override-Storage-Policy-Index': real_storage_policy_index}
         real_obj_status, real_obj_info, real_obj_iter = \
@@ -164,11 +177,13 @@ class ContainerReconciler(Daemon):
                 return False
         real_ts = float(real_ts)
 
-        # the object is newer than the queue entry; do nothing
+        # the source object is newer than the queue entry; do nothing
         if real_ts > q_timestamp:
+            self.stats['source_newer'] += 1
             return True
 
         # move the object
+        self.stats['misplaced_objects'] += 1
         headers = real_obj_info.copy()
         headers['X-Override-Storage-Policy-Index'] = dest_storage_policy_index
 
@@ -186,7 +201,8 @@ class ContainerReconciler(Daemon):
                                   "the right place", account, container, obj)
             return False
 
-        self.throw_tombstones(account, container, obj, q_timestamp,
+        self.throw_tombstones(account, container, obj,
+                              slightly_later_timestamp(real_ts),
                               real_storage_policy_index)
         return True
 
@@ -194,7 +210,7 @@ class ContainerReconciler(Daemon):
         """
         Process every entry in the queue.
         """
-        self.logger.info('pulling item from the queue')
+        self.logger.debug('pulling item from the queue')
         for c in self.swift.iter_containers(self.misplaced_objects_account):
             container = c['name'].encode('utf8')  # encoding here is defensive
             for raw_obj in self.swift.iter_objects(
@@ -202,4 +218,11 @@ class ContainerReconciler(Daemon):
                 info = parse_raw_obj(raw_obj)
                 handled_success = self.ensure_object_in_right_location(**info)
                 if handled_success:
-                    self.pop_q(raw_obj)
+                    self.pop_queue(container, raw_obj['name'],
+                                   info['q_timestamp'])
+            # Try to delete the container so the queue doesn't grow without
+            # bound. However, be okay if someone else has put things in or our
+            # deletions haven't made it everywhere or something.
+            self.swift.delete_container(
+                self.misplaced_objects_account, container,
+                acceptable_statuses=(2, 404, 409, 412))

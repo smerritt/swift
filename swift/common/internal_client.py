@@ -176,7 +176,9 @@ class InternalClient(object):
                     return resp
             except (Exception, Timeout):
                 exc_type, exc_value, exc_traceback = exc_info()
-            sleep(2 ** (attempt + 1))
+            # sleep between tries, not after each one
+            if attempt != self.request_tries - 1:
+                sleep(2 ** (attempt + 1))
         if resp:
             raise UnexpectedResponse(
                 _('Unexpected response: %s') % resp.status, resp)
@@ -592,7 +594,7 @@ class InternalClient(object):
                                   headers=headers)
 
     def get_object(self, account, container, obj, headers,
-                        acceptable_statuses=(2,)):
+                   acceptable_statuses=(2,)):
         """
         Returns a 3-tuple (status, headers, iterator of object body)
         """
