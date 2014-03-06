@@ -22,11 +22,15 @@ from swift.common.daemon import Daemon
 from swift.common.internal_client import InternalClient, UnexpectedResponse
 from swift.common.utils import get_logger, split_path, quorum_size, \
     FileLikeIter, last_modified_date_to_timestamp
-from swift.common.direct_client import direct_head_container, ClientException
+from swift.common.direct_client import direct_head_container, \
+    direct_delete_container_object, ClientException
+
+
+EPSILON = 0.000001
 
 
 def slightly_later_timestamp(ts):
-    return ts + 0.000001
+    return ts + EPSILON
 
 
 def parse_raw_obj(obj_info):
@@ -143,7 +147,7 @@ class ContainerReconciler(Daemon):
         dest_storage_policy_index = direct_get_oldest_storage_policy_index(
             self.swift.app.container_ring, account, container)
         if dest_storage_policy_index == real_storage_policy_index:
-            self.stats['correct_objects'] += 1
+            self.stats['noop_objects'] += 1
             return True
 
         # check if object exists in the destination already
@@ -171,16 +175,21 @@ class ContainerReconciler(Daemon):
         if real_ts is None:
             if q_timestamp < time.time() - self.reclaim_age:
                 # it's old and there are no tombstones or anything; give up
+                self.stats['lost_object'] += 1
                 return True
             else:
                 # try again later
+                self.stats['unavailable_object'] += 1
                 return False
         real_ts = float(real_ts)
 
         # the source object is newer than the queue entry; do nothing
-        if real_ts > q_timestamp:
+        if real_ts - q_timestamp >= EPSILON:
             self.stats['source_newer'] += 1
             return True
+        elif q_timestamp - real_ts >= EPSILON:
+            self.stats['unavailable_object'] += 1
+            return False
 
         # move the object
         self.stats['misplaced_objects'] += 1

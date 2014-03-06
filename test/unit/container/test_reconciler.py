@@ -25,6 +25,7 @@ from datetime import datetime
 from swift.container import reconciler
 from swift.common.direct_client import ClientException
 from swift.common import swob
+from swift.common.utils import split_path
 
 from test.unit import FakeLogger, FakeRing
 from test.unit.common.middleware.helpers import FakeSwift
@@ -34,9 +35,49 @@ def timestamp_to_last_modified(timestamp):
     return datetime.fromtimestamp(timestamp).strftime('%Y-%m-%dT%H:%M:%S.%f')
 
 
+class FakeStoragePolicySwift(object):
+
+    def __init__(self):
+        self.storage_policy = defaultdict(FakeSwift)
+        self._mock_oldest_spi_map = {}
+
+    def __getattribute__(self, name):
+        try:
+            return object.__getattribute__(self, name)
+        except AttributeError:
+            return getattr(self.storage_policy[None], name)
+
+    def __call__(self, env, start_response):
+        method = env['REQUEST_METHOD']
+        path = env['PATH_INFO']
+        _, acc, cont, obj = split_path(env['PATH_INFO'], 0, 4,
+                                       rest_with_last=True)
+        if not obj:
+            spidx = None
+        else:
+            spidx = int(env.get('HTTP_X_OVERRIDE_STORAGE_POLICY_INDEX',
+                                self._mock_oldest_spi_map.get(cont, 0)))
+
+        try:
+            return self.storage_policy[spidx].__call__(
+                env, start_response)
+        except KeyError:
+            pass
+
+        if method == 'PUT':
+            resp_class = swob.HTTPCreated
+        else:
+            resp_class = swob.HTTPNotFound
+        self.storage_policy[spidx].register(
+            method, path, resp_class, {}, '')
+
+        return self.storage_policy[spidx].__call__(
+            env, start_response)
+
+
 class FakeInternalClient(reconciler.InternalClient):
     def __init__(self, listings):
-        self.app = FakeSwift()
+        self.app = FakeStoragePolicySwift()
         self.user_agent = 'fake-internal-client'
         self.request_tries = 1
         self.parse(listings)
@@ -44,9 +85,11 @@ class FakeInternalClient(reconciler.InternalClient):
     def parse(self, listings):
         self.accounts = defaultdict(lambda: defaultdict(list))
         for item, timestamp in listings.items():
-            account, container_name, obj_name = item.lstrip('/').split('/', 2)
+            storage_policy_index, path = item
+            account, container_name, obj_name = split_path(
+                path, 0, 3, rest_with_last=True)
             self.accounts[account][container_name].append(
-                (obj_name, timestamp))
+                (obj_name, storage_policy_index, timestamp))
         for account_name, containers in self.accounts.items():
             for con in containers:
                 self.accounts[account_name][con].sort(key=lambda t: t[0])
@@ -56,13 +99,14 @@ class FakeInternalClient(reconciler.InternalClient):
             for container, objects in containers.items():
                 container_path = account_path + '/' + container
                 container_listing_data = []
-                for obj_name, timestamp in objects:
+                for obj_name, storage_policy_index, timestamp in objects:
                     obj_path = container_path + '/' + obj_name
                     headers = {'X-Timestamp': timestamp}
                     # register object response
-                    self.app.register('GET', obj_path, swob.HTTPOk, headers)
-                    self.app.register('DELETE', obj_path,
-                                      swob.HTTPNoContent, {})
+                    self.app.storage_policy[storage_policy_index].register(
+                        'GET', obj_path, swob.HTTPOk, headers)
+                    self.app.storage_policy[storage_policy_index].register(
+                        'DELETE', obj_path, swob.HTTPNoContent, {})
                     # container listing entry
                     obj_data = {
                         'hash': '%s-etag' % obj_path,
@@ -204,14 +248,13 @@ class TestReconciler(unittest.TestCase):
         with mock.patch('swift.container.reconciler.InternalClient'):
             self.reconciler = reconciler.ContainerReconciler(conf)
         self.reconciler.logger = self.logger
-        self._mock_oldest_spi_map = {}
 
     def _mock_listing(self, objects):
         self.reconciler.swift = FakeInternalClient(objects)
         self.fake_swift = self.reconciler.swift.app
 
     def _mock_oldest_spi(self, container_oldest_spi_map):
-        self._mock_oldest_spi_map = container_oldest_spi_map
+        self.fake_swift._mock_oldest_spi_map = container_oldest_spi_map
 
     def _run_once(self):
         """
@@ -223,33 +266,24 @@ class TestReconciler(unittest.TestCase):
         """
 
         def mock_oldest_spi(ring, account, container_name):
-            return self._mock_oldest_spi_map.get(container_name, 0)
+            return self.fake_swift._mock_oldest_spi_map.get(container_name, 0)
 
-        delete_listings_mock = mock.patch.object(
-            reconciler, 'direct_delete_container_entry')
+        items = {
+            'direct_get_oldest_storage_policy_index': mock_oldest_spi,
+            'direct_delete_container_entry': mock.DEFAULT,
+        }
 
-        with mock.patch.object(reconciler,
-                               'direct_get_oldest_storage_policy_index',
-                               new=mock_oldest_spi):
-            with delete_listings_mock as dlm:
-                self.reconciler.run_once()
+        with mock.patch.multiple(reconciler, **items) as mocks:
+            self.reconciler.run_once()
 
-        return [c[1][1:4] for c in dlm.mock_calls]
+        return [c[1][1:4] for c in
+                mocks['direct_delete_container_entry'].mock_calls]
 
     def test_object_move(self):
         self._mock_listing({
-            "/.misplaced_objects/3600/1:/AUTH_bob/c/o1": 3618.841878,
+            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3618.841878,
+            (1, "/AUTH_bob/c/o1"): 3618.841878,
         })
-        dest_response = (swob.HTTPNotFound, {}, '')
-        headers = {'X-Timestamp': '3618.841878'}
-        real_response = (swob.HTTPOk, headers, '')
-        responses = [dest_response, real_response]
-        self.fake_swift.register_responses(
-            'GET', '/v1/AUTH_bob/c/o1', responses)
-        self.fake_swift.register(
-            'PUT', '/v1/AUTH_bob/c/o1', swob.HTTPCreated, {}, '')
-        self.fake_swift.register(
-            'DELETE', '/v1/AUTH_bob/c/o1', swob.HTTPNoContent, {}, '')
         self._mock_oldest_spi({'c': 0})
         deleted_container_entries = self._run_once()
         self.assertEqual(self.reconciler.stats['misplaced_objects'], 1)
@@ -260,48 +294,40 @@ class TestReconciler(unittest.TestCase):
             self.fake_swift.calls,
             [('GET', '/v1/.misplaced_objects' + listing_qs('')),
              ('GET', '/v1/.misplaced_objects/3600' + listing_qs('')),
-             ('HEAD', '/v1/AUTH_bob/c/o1'),
-             ('GET', '/v1/AUTH_bob/c/o1'),
-             ('PUT', '/v1/AUTH_bob/c/o1'),
-             ('DELETE', '/v1/AUTH_bob/c/o1'),
              ('GET', '/v1/.misplaced_objects/3600' +
               listing_qs('1:/AUTH_bob/c/o1')),
              ('DELETE', '/v1/.misplaced_objects/3600'),
              ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
-
-        sent_headers = self.fake_swift.headers
         self.assertEqual(
-            # the object *should be* in policy 0
-            sent_headers[2].get('X-Override-Storage-Policy-Index'), '0')
+            self.fake_swift.storage_policy[0].calls,
+            [('HEAD', '/v1/AUTH_bob/c/o1'),
+             ('PUT', '/v1/AUTH_bob/c/o1')])
+        put_headers = self.fake_swift.storage_policy[0].headers[1]
         self.assertEqual(
-            # but the object *is* in policy 1
-            sent_headers[3].get('X-Override-Storage-Policy-Index'), '1')
-        self.assertEqual(
-            # so we PUT it into policy 0
-            sent_headers[4].get('X-Override-Storage-Policy-Index'), '0')
-        self.assertEqual(
-            # and DELETE it from policy 1
-            sent_headers[5].get('X-Override-Storage-Policy-Index'), '1')
+            self.fake_swift.storage_policy[1].calls,
+            [('GET', '/v1/AUTH_bob/c/o1'),
+             ('DELETE', '/v1/AUTH_bob/c/o1')])
+        delete_headers = self.fake_swift.storage_policy[1].headers[1]
 
         # we PUT the object in the right place with its original timestamp
         self.assertEqual(
-            sent_headers[4].get('X-Timestamp'), '3618.841878')
+            put_headers.get('X-Timestamp'), '3618.841878')
         # we DELETE the object from the wrong place with a slightly newer
         # timestamp to make sure the change takes effect
         self.assertEqual(
-            sent_headers[5].get('X-Timestamp'), '3618.841879')
-
+            delete_headers.get('X-Timestamp'), '3618.841879')
         # and when we're done, we clean up the container listings
         self.assertEqual(deleted_container_entries,
                          [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
 
-    def test_object_move_already_in_right_place(self):
+    def test_object_enqueued_for_the_correct_dest_noop(self):
         self._mock_listing({
-            "/.misplaced_objects/3600/1:/AUTH_bob/c/o1": 3618.841878,
+            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3618.841878,
+            (1, "/AUTH_bob/c/o1"): 3618.841878,
         })
         self._mock_oldest_spi({'c': 1})
         deleted_container_entries = self._run_once()
-        self.assertEqual(self.reconciler.stats['correct_objects'], 1)
+        self.assertEqual(self.reconciler.stats['noop_objects'], 1)
 
         self.maxDiff = None
         self.assertEqual(
@@ -313,63 +339,14 @@ class TestReconciler(unittest.TestCase):
              ('DELETE', '/v1/.misplaced_objects/3600'),
              ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
 
-        self.assertEqual(deleted_container_entries,
-                         [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
-
-    def test_object_move_dest_object_newer_than_queue_entry(self):
-        self._mock_listing({
-            "/.misplaced_objects/3600/1:/AUTH_bob/c/o1": 3679.2019,
-        })
-        self.fake_swift.register(
-            'GET', '/v1/AUTH_bob/c/o1', swob.HTTPOk,
-            {'X-Timestamp': '4000.365353'})  # newer than queue entry
-        self.fake_swift.register(
-            'DELETE', '/v1/AUTH_bob/c/o1', swob.HTTPNoContent, {})
-        self._mock_oldest_spi({'c': 0})
-        deleted_container_entries = self._run_once()
-        self.assertEqual(self.reconciler.stats['newer_objects'], 1)
-
-        self.maxDiff = None
-        self.assertEqual(
-            self.fake_swift.calls,
-            [('GET', '/v1/.misplaced_objects' + listing_qs('')),
-             ('GET', '/v1/.misplaced_objects/3600' + listing_qs('')),
-             ('HEAD', '/v1/AUTH_bob/c/o1'),
-             ('DELETE', '/v1/AUTH_bob/c/o1'),
-             ('GET', '/v1/.misplaced_objects/3600' +
-              listing_qs('1:/AUTH_bob/c/o1')),
-             ('DELETE', '/v1/.misplaced_objects/3600'),
-             ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
-
-        sent_headers = self.fake_swift.headers
-        self.assertEqual(
-            # the object is in policy 0 with a newer timestamp
-            sent_headers[2].get('X-Override-Storage-Policy-Index'), '0')
-        self.assertEqual(
-            # so we just make sure it's deleted from policy 1
-            sent_headers[3].get('X-Override-Storage-Policy-Index'), '1')
-
-        # the tombstones have the oldest possible timestamp that will actually
-        # cause object cleanup, just in case there's a newer object hanging
-        # out on handoffs somewhere
-        self.assertEqual(
-            sent_headers[3].get('X-Timestamp'), '3679.201901')
-
-        # we cleaned up the old object, so this counts as done
         self.assertEqual(deleted_container_entries,
                          [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
 
     def test_object_move_src_object_newer_than_queue_entry(self):
         self._mock_listing({
-            "/.misplaced_objects/3600/1:/AUTH_bob/c/o1": 3600.123456,
+            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3600.123456,
+            (1, '/AUTH_bob/c/o1'): 3600.234567,
         })
-        # the destination object doesn't exist
-        self.fake_swift.register(
-            'HEAD', '/v1/AUTH_bob/c/o1', swob.HTTPNotFound, {})
-        # the source object exists and is newer than the queue entry
-        self.fake_swift.register(
-            'GET', '/v1/AUTH_bob/c/o1', swob.HTTPNotFound,
-            {'X-Timestamp': '3600.234567'})
         self._mock_oldest_spi({'c': 0})
         deleted_container_entries = self._run_once()
         self.assertEqual(self.reconciler.stats['source_newer'], 1)
@@ -379,36 +356,155 @@ class TestReconciler(unittest.TestCase):
             self.fake_swift.calls,
             [('GET', '/v1/.misplaced_objects' + listing_qs('')),
              ('GET', '/v1/.misplaced_objects/3600' + listing_qs('')),
-             ('HEAD', '/v1/AUTH_bob/c/o1'),
-             ('GET', '/v1/AUTH_bob/c/o1'),
              ('GET', '/v1/.misplaced_objects/3600' +
               listing_qs('1:/AUTH_bob/c/o1')),
              ('DELETE', '/v1/.misplaced_objects/3600'),
              ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
-
-        sent_headers = self.fake_swift.headers
         self.assertEqual(
-            sent_headers[2].get('X-Override-Storage-Policy-Index'), '0')
+            self.fake_swift.storage_policy[0].calls,
+            [('HEAD', '/v1/AUTH_bob/c/o1')])
         self.assertEqual(
-            sent_headers[3].get('X-Override-Storage-Policy-Index'), '1')
+            self.fake_swift.storage_policy[1].calls,
+            [('GET', '/v1/AUTH_bob/c/o1')])
 
+        self.assertEqual(deleted_container_entries,
+                         [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
+
+    def test_object_move_src_object_tiny_bit_newer_than_queue_entry(self):
+        self._mock_listing({
+            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3600.123456,
+            (1, '/AUTH_bob/c/o1'): 3600.1234561,  # tiny bit newer
+        })
+        self._mock_oldest_spi({'c': 0})
+        deleted_container_entries = self._run_once()
+
+        self.maxDiff = None
+        self.assertEqual(
+            self.fake_swift.calls,
+            [('GET', '/v1/.misplaced_objects' + listing_qs('')),
+             ('GET', '/v1/.misplaced_objects/3600' + listing_qs('')),
+             ('GET', '/v1/.misplaced_objects/3600' +
+              listing_qs('1:/AUTH_bob/c/o1')),
+             ('DELETE', '/v1/.misplaced_objects/3600'),
+             ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
+        self.assertEqual(
+            self.fake_swift.storage_policy[0].calls,
+            [('HEAD', '/v1/AUTH_bob/c/o1'),
+             ('PUT', '/v1/AUTH_bob/c/o1')])
+        put_headers = self.fake_swift.storage_policy[0].headers[1]
+        self.assertEqual(
+            self.fake_swift.storage_policy[1].calls,
+            [('GET', '/v1/AUTH_bob/c/o1'),
+             ('DELETE', '/v1/AUTH_bob/c/o1')])
+        delete_headers = self.fake_swift.storage_policy[1].headers[1]
+
+        self.assertEqual(
+            put_headers.get('X-Timestamp'), '3600.1234561')
+        self.assertEqual(
+            delete_headers.get('X-Timestamp'), '3600.1234571')
+
+        self.assertEqual(deleted_container_entries,
+                         [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
+
+    def test_object_move_src_object_older_than_queue_entry(self):
+        # should be some sort of retry case
+        self._mock_listing({
+            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3600.123456,
+            (1, '/AUTH_bob/c/o1'): 3589.123456,  # slightly older
+        })
+        self._mock_oldest_spi({'c': 0})
+        deleted_container_entries = self._run_once()
+
+        self.maxDiff = None
+        self.assertEqual(
+            self.fake_swift.calls,
+            [('GET', '/v1/.misplaced_objects' + listing_qs('')),
+             ('GET', '/v1/.misplaced_objects/3600' + listing_qs('')),
+             ('GET', '/v1/.misplaced_objects/3600' +
+              listing_qs('1:/AUTH_bob/c/o1')),
+             ('DELETE', '/v1/.misplaced_objects/3600'),
+             ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
+        self.assertEqual(
+            self.fake_swift.storage_policy[0].calls,
+            [('HEAD', '/v1/AUTH_bob/c/o1')])
+        self.assertEqual(
+            self.fake_swift.storage_policy[1].calls,
+            [('GET', '/v1/AUTH_bob/c/o1')])
+
+        # we'll have to try again later
+        self.assertEqual(deleted_container_entries, [])
+
+    def test_object_move_src_object_tiny_bit_older_than_queue_entry(self):
+        # should be some sort of retry case
+        self._mock_listing({
+            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3600.123456,
+            (1, '/AUTH_bob/c/o1'): 3600.123455,  # tiny bit older
+        })
+        self._mock_oldest_spi({'c': 0})
+        deleted_container_entries = self._run_once()
+
+        self.maxDiff = None
+        self.assertEqual(
+            self.fake_swift.calls,
+            [('GET', '/v1/.misplaced_objects' + listing_qs('')),
+             ('GET', '/v1/.misplaced_objects/3600' + listing_qs('')),
+             ('GET', '/v1/.misplaced_objects/3600' +
+              listing_qs('1:/AUTH_bob/c/o1')),
+             ('DELETE', '/v1/.misplaced_objects/3600'),
+             ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
+        self.assertEqual(
+            self.fake_swift.storage_policy[0].calls,
+            [('HEAD', '/v1/AUTH_bob/c/o1'),
+             ('PUT', '/v1/AUTH_bob/c/o1')])
+        self.assertEqual(
+            self.fake_swift.storage_policy[1].calls,
+            [('GET', '/v1/AUTH_bob/c/o1'),
+             ('DELETE', '/v1/AUTH_bob/c/o1')])
+
+        # it was close enough
+        self.assertEqual(deleted_container_entries,
+                         [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
+
+    def test_object_move_dest_object_newer_than_queue_entry(self):
+        self._mock_listing({
+            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3679.2019,
+            (1, "/AUTH_bob/c/o1"): 3679.2019,
+            (0, "/AUTH_bob/c/o1"): 4000.365353,  # slightly newer
+        })
+        self._mock_oldest_spi({'c': 0})
+        deleted_container_entries = self._run_once()
+        self.assertEqual(self.reconciler.stats['newer_objects'], 1)
+
+        self.maxDiff = None
+        self.assertEqual(
+            self.fake_swift.calls,
+            [('GET', '/v1/.misplaced_objects' + listing_qs('')),
+             ('GET', '/v1/.misplaced_objects/3600' + listing_qs('')),
+             ('GET', '/v1/.misplaced_objects/3600' +
+              listing_qs('1:/AUTH_bob/c/o1')),
+             ('DELETE', '/v1/.misplaced_objects/3600'),
+             ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
+        self.assertEqual(
+            self.fake_swift.storage_policy[0].calls,
+            [('HEAD', '/v1/AUTH_bob/c/o1')])
+        self.assertEqual(
+            self.fake_swift.storage_policy[1].calls,
+            [('DELETE', '/v1/AUTH_bob/c/o1')])
+        delete_headers = self.fake_swift.storage_policy[1].headers[0]
+
+        self.assertEqual(
+            delete_headers.get('X-Timestamp'), '3679.201901')
+
+        # we cleaned up the old object, so this counts as done
         self.assertEqual(deleted_container_entries,
                          [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
 
     def test_object_move_dest_object_older_than_queue_entry(self):
         self._mock_listing({
-            "/.misplaced_objects/36000/1:/AUTH_bob/c/o1": 36123.383925,
+            (None, "/.misplaced_objects/36000/1:/AUTH_bob/c/o1"): 36123.383925,
+            (1, "/AUTH_bob/c/o1"): 36123.383925,
+            (0, "/AUTH_bob/c/o1"): 36121.5,  # slightly older
         })
-        dest_response = (swob.HTTPNotFound, {}, '')
-        headers = {'X-Timestamp': '36121.5'}  # slightly older
-        real_response = (swob.HTTPOk, headers, '')
-        responses = [dest_response, real_response]
-        self.fake_swift.register_responses(
-            'GET', '/v1/AUTH_bob/c/o1', responses)
-        self.fake_swift.register(
-            'PUT', '/v1/AUTH_bob/c/o1', swob.HTTPCreated, {}, '')
-        self.fake_swift.register(
-            'DELETE', '/v1/AUTH_bob/c/o1', swob.HTTPNoContent, {}, '')
         self._mock_oldest_spi({'c': 0})
         deleted_container_entries = self._run_once()
 
@@ -417,56 +513,41 @@ class TestReconciler(unittest.TestCase):
             self.fake_swift.calls,
             [('GET', '/v1/.misplaced_objects' + listing_qs('')),
              ('GET', '/v1/.misplaced_objects/36000' + listing_qs('')),
-             ('HEAD', '/v1/AUTH_bob/c/o1'),
-             ('GET', '/v1/AUTH_bob/c/o1'),
-             ('PUT', '/v1/AUTH_bob/c/o1'),
-             ('DELETE', '/v1/AUTH_bob/c/o1'),
              ('GET', '/v1/.misplaced_objects/36000' +
               listing_qs('1:/AUTH_bob/c/o1')),
              ('DELETE', '/v1/.misplaced_objects/36000'),
              ('GET', '/v1/.misplaced_objects' + listing_qs('36000'))])
+        self.assertEqual(
+            self.fake_swift.storage_policy[1].calls,
+            [('GET', '/v1/AUTH_bob/c/o1'),
+             ('DELETE', '/v1/AUTH_bob/c/o1')])
+        delete_headers = self.fake_swift.storage_policy[1].headers[1]
+        self.assertEqual(
+            self.fake_swift.storage_policy[0].calls,
+            [('HEAD', '/v1/AUTH_bob/c/o1'),
+             ('PUT', '/v1/AUTH_bob/c/o1')])
+        put_headers = self.fake_swift.storage_policy[0].headers[1]
 
-        sent_headers = self.fake_swift.headers
         self.assertEqual(
-            # the object *should be* in policy 0
-            sent_headers[2].get('X-Override-Storage-Policy-Index'), '0')
-        self.assertEqual(
-            # but the object *is* in policy 1
-            sent_headers[3].get('X-Override-Storage-Policy-Index'), '1')
-        self.assertEqual(
-            # so we PUT it into policy 0
-            sent_headers[4].get('X-Override-Storage-Policy-Index'), '0')
-        self.assertEqual(
-            # and DELETE it from policy 1
-            sent_headers[5].get('X-Override-Storage-Policy-Index'), '1')
-
-        # the PUT to the right policy keeps the original object's timestamp
-        self.assertEqual(
-            sent_headers[4].get('X-Timestamp'), '36121.5')
+            put_headers.get('X-Timestamp'), '36123.383925')
         # the DELETE to the wrong policy has to be slightly newer or else
         # it'll end up as a noop
         self.assertEqual(
-            sent_headers[5].get('X-Timestamp'), '36121.500001')
+            delete_headers.get('X-Timestamp'), '36123.383926')
 
         self.assertEqual(deleted_container_entries,
                          [('.misplaced_objects', '36000', '1:/AUTH_bob/c/o1')])
 
     def test_object_move_put_fails(self):
-        # XXX why is this test so slow? it's like 2 seconds in here
         self._mock_listing({
-            "/.misplaced_objects/36000/1:/AUTH_bob/c/o1": 36123.383925,
+            (None, "/.misplaced_objects/36000/1:/AUTH_bob/c/o1"): 36123.383925,
+            (1, "/AUTH_bob/c/o1"): 36123.383925,
         })
-        dest_response = (swob.HTTPNotFound, {}, '')
-        headers = {'X-Timestamp': '36121.5'}  # slightly older
-        real_response = (swob.HTTPOk, headers, '')
-        responses = [dest_response, real_response]
-        self.fake_swift.register_responses(
-            'GET', '/v1/AUTH_bob/c/o1', responses)
-        self.fake_swift.register(
-            'PUT', '/v1/AUTH_bob/c/o1', swob.HTTPNotFound, {}, '')
-        self.fake_swift.register(
-            'DELETE', '/v1/AUTH_bob/c/o1', swob.HTTPNoContent, {}, '')
         self._mock_oldest_spi({'c': 0})
+
+        # make the put to dest fail!
+        self.fake_swift.storage_policy[0].register(
+            'PUT', '/v1/AUTH_bob/c/o1', swob.HTTPServiceUnavailable, {})
         deleted_container_entries = self._run_once()
 
         self.maxDiff = None
@@ -474,14 +555,17 @@ class TestReconciler(unittest.TestCase):
             self.fake_swift.calls,
             [('GET', '/v1/.misplaced_objects' + listing_qs('')),
              ('GET', '/v1/.misplaced_objects/36000' + listing_qs('')),
-             ('HEAD', '/v1/AUTH_bob/c/o1'),
-             ('GET', '/v1/AUTH_bob/c/o1'),
-             ('PUT', '/v1/AUTH_bob/c/o1'),
              ('GET', '/v1/.misplaced_objects/36000' +
               listing_qs('1:/AUTH_bob/c/o1')),
              ('DELETE', '/v1/.misplaced_objects/36000'),
              ('GET', '/v1/.misplaced_objects' + listing_qs('36000'))])
-
+        self.assertEqual(
+            self.fake_swift.storage_policy[0].calls,
+            [('HEAD', '/v1/AUTH_bob/c/o1'),
+             ('PUT', '/v1/AUTH_bob/c/o1')])
+        self.assertEqual(
+            self.fake_swift.storage_policy[1].calls,
+            [('GET', '/v1/AUTH_bob/c/o1')])
         self.assertEqual(deleted_container_entries, [])
         self.assertEqual(self.reconciler.stats['unhandled_errors'], 0)
 
@@ -490,16 +574,11 @@ class TestReconciler(unittest.TestCase):
         container = str(queue_ts // 3600 * 3600)
 
         self._mock_listing({
-            "/.misplaced_objects/%s/1:/AUTH_jeb/c/o1" % container: queue_ts
+            (
+                None, "/.misplaced_objects/%s/1:/AUTH_jeb/c/o1" % container
+            ): queue_ts
         })
-
-        # the destination object doesn't exist at all (no tombstones or
-        # anything)
-        self.fake_swift.register(
-            'HEAD', '/v1/AUTH_jeb/c/o1', swob.HTTPNotFound, {})
-        # the source object doesn't either
-        self.fake_swift.register(
-            'GET', '/v1/AUTH_jeb/c/o1', swob.HTTPNotFound, {})
+        self._mock_oldest_spi({'c': 0})
 
         deleted_container_entries = self._run_once()
 
@@ -508,13 +587,18 @@ class TestReconciler(unittest.TestCase):
             self.fake_swift.calls,
             [('GET', '/v1/.misplaced_objects' + listing_qs('')),
              ('GET', '/v1/.misplaced_objects/%s' % container + listing_qs('')),
-             ('HEAD', '/v1/AUTH_jeb/c/o1'),
-             ('GET', '/v1/AUTH_jeb/c/o1'),
              ('GET', '/v1/.misplaced_objects/%s' % container +
               listing_qs('1:/AUTH_jeb/c/o1')),
              ('DELETE', '/v1/.misplaced_objects/%s' % container),
              ('GET', '/v1/.misplaced_objects' + listing_qs(container))])
-
+        self.assertEqual(
+            self.fake_swift.storage_policy[0].calls,
+            [('HEAD', '/v1/AUTH_jeb/c/o1')],
+        )
+        self.assertEqual(
+            self.fake_swift.storage_policy[1].calls,
+            [('GET', '/v1/AUTH_jeb/c/o1')],
+        )
         # the queue entry is recent enough that there could easily be
         # tombstones on offline nodes or something, so we'll just leave it
         # here and try again later
@@ -525,16 +609,11 @@ class TestReconciler(unittest.TestCase):
         container = str(queue_ts // 3600 * 3600)
 
         self._mock_listing({
-            "/.misplaced_objects/%s/1:/AUTH_jeb/c/o1" % container: queue_ts
+            (
+                None, "/.misplaced_objects/%s/1:/AUTH_jeb/c/o1" % container
+            ): queue_ts
         })
-
-        # the destination object doesn't exist at all (no tombstones or
-        # anything)
-        self.fake_swift.register(
-            'HEAD', '/v1/AUTH_jeb/c/o1', swob.HTTPNotFound, {})
-        # the source object doesn't either
-        self.fake_swift.register(
-            'GET', '/v1/AUTH_jeb/c/o1', swob.HTTPNotFound, {})
+        self._mock_oldest_spi({'c': 0})
 
         deleted_container_entries = self._run_once()
 
@@ -543,12 +622,18 @@ class TestReconciler(unittest.TestCase):
             self.fake_swift.calls,
             [('GET', '/v1/.misplaced_objects' + listing_qs('')),
              ('GET', '/v1/.misplaced_objects/%s' % container + listing_qs('')),
-             ('HEAD', '/v1/AUTH_jeb/c/o1'),
-             ('GET', '/v1/AUTH_jeb/c/o1'),
              ('GET', '/v1/.misplaced_objects/%s' % container +
               listing_qs('1:/AUTH_jeb/c/o1')),
              ('DELETE', '/v1/.misplaced_objects/%s' % container),
              ('GET', '/v1/.misplaced_objects' + listing_qs(container))])
+        self.assertEqual(
+            self.fake_swift.storage_policy[0].calls,
+            [('HEAD', '/v1/AUTH_jeb/c/o1')],
+        )
+        self.assertEqual(
+            self.fake_swift.storage_policy[1].calls,
+            [('GET', '/v1/AUTH_jeb/c/o1')],
+        )
 
         # the queue entry is old enough that the tombstones, if any, have
         # probably been reaped, so we'll just give up

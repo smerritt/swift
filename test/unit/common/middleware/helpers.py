@@ -46,8 +46,9 @@ class FakeSwift(object):
             try:
                 resp = resp.pop(0)
             except IndexError:
-                print "Didn't find any more %r in allowed responses" % (
-                    (method, path),)
+                raise IndexError("Didn't find any more %r "
+                                 "in allowed responses" % (
+                                     (method, path),))
         return resp
 
     def __call__(self, env, start_response):
@@ -58,8 +59,7 @@ class FakeSwift(object):
         if env.get('QUERY_STRING'):
             path += '?' + env['QUERY_STRING']
 
-        headers = swob.Request(env).headers
-        self._calls.append((method, path, headers))
+        req_headers = swob.Request(env).headers
         self.swift_sources.append(env.get('swift.source'))
 
         try:
@@ -79,8 +79,10 @@ class FakeSwift(object):
                 resp_class = swob.HTTPOk
                 headers, body = self.uploaded[path]
             else:
-                print "Didn't find %r in allowed responses" % ((method, path),)
-                raise
+                raise KeyError("Didn't find %r in allowed responses" % (
+                    (method, path),))
+
+        self._calls.append((method, path, req_headers))
 
         # simulate object PUT
         if method == 'PUT' and obj:
