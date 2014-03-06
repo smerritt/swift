@@ -21,16 +21,15 @@ from eventlet import GreenPile, GreenPool
 from swift.common.daemon import Daemon
 from swift.common.internal_client import InternalClient, UnexpectedResponse
 from swift.common.utils import get_logger, split_path, quorum_size, \
-    FileLikeIter, last_modified_date_to_timestamp
+    FileLikeIter, last_modified_date_to_timestamp, normalize_timestamp
 from swift.common.direct_client import direct_head_container, \
     direct_delete_container_object, ClientException
 
 
-EPSILON = 0.000001
-
-
 def slightly_later_timestamp(ts):
-    return ts + EPSILON
+    # For some reason, Swift uses a 10-microsecond resolution instead of
+    # Python's 1-microsecond resolution.
+    return float(ts) + 0.00001
 
 
 def parse_raw_obj(obj_info):
@@ -44,8 +43,8 @@ def parse_raw_obj(obj_info):
         'account': account,
         'container': container,
         'obj': obj,
-        'q_timestamp': last_modified_date_to_timestamp(
-            obj_info['last_modified']),
+        'q_timestamp': normalize_timestamp(last_modified_date_to_timestamp(
+            obj_info['last_modified'])),
     }
 
 
@@ -137,7 +136,7 @@ class ContainerReconciler(Daemon):
 
     def throw_tombstones(self, account, container, obj, timestamp,
                          storage_policy_index):
-        headers = {'X-Timestamp': timestamp,
+        headers = {'X-Timestamp': slightly_later_timestamp(timestamp),
                    'X-Override-Storage-Policy-Index': storage_policy_index}
         self.swift.delete_object(account, container, obj,
                                  headers=headers)
@@ -156,11 +155,10 @@ class ContainerReconciler(Daemon):
         dest_obj = self.swift.get_object_metadata(account, container, obj,
                                                   headers=headers,
                                                   acceptable_statuses=(2, 4))
-        dest_ts = float(dest_obj.get('x-timestamp', '0.0'))
+        dest_ts = normalize_timestamp(dest_obj.get('x-timestamp', '0.0'))
         if dest_ts >= q_timestamp:
             self.stats['newer_objects'] += 1
-            self.throw_tombstones(account, container, obj,
-                                  slightly_later_timestamp(q_timestamp),
+            self.throw_tombstones(account, container, obj, q_timestamp,
                                   real_storage_policy_index)
             return True
 
@@ -173,7 +171,7 @@ class ContainerReconciler(Daemon):
                                   acceptable_statuses=(2, 4))
         real_ts = real_obj_info.get("X-Timestamp")
         if real_ts is None:
-            if q_timestamp < time.time() - self.reclaim_age:
+            if float(q_timestamp) < time.time() - self.reclaim_age:
                 # it's old and there are no tombstones or anything; give up
                 self.stats['lost_object'] += 1
                 return True
@@ -181,13 +179,17 @@ class ContainerReconciler(Daemon):
                 # try again later
                 self.stats['unavailable_object'] += 1
                 return False
-        real_ts = float(real_ts)
+        real_ts = normalize_timestamp(real_ts)
 
-        # the source object is newer than the queue entry; do nothing
-        if real_ts - q_timestamp >= EPSILON:
+        if real_ts > q_timestamp:
+            # the source object is newer than the queue entry; delete this
+            # queue entry (there'll be another one with the right timestamp
+            # soon enough)
             self.stats['source_newer'] += 1
             return True
-        elif q_timestamp - real_ts >= EPSILON:
+        elif real_ts < q_timestamp:
+            # the source object is older than the queue entry; a newer version
+            # exists somewhere in the cluster, so wait and try again
             self.stats['unavailable_object'] += 1
             return False
 
@@ -210,8 +212,7 @@ class ContainerReconciler(Daemon):
                                   "the right place", account, container, obj)
             return False
 
-        self.throw_tombstones(account, container, obj,
-                              slightly_later_timestamp(real_ts),
+        self.throw_tombstones(account, container, obj, real_ts,
                               real_storage_policy_index)
         return True
 

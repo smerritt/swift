@@ -158,7 +158,7 @@ class TestReconcilerUtils(unittest.TestCase):
         self.assertEqual(got['account'], 'AUTH_bob')
         self.assertEqual(got['container'], 'con')
         self.assertEqual(got['obj'], 'obj')
-        self.assertEqual(got['q_timestamp'], 2017551.493500)
+        self.assertEqual(got['q_timestamp'], '0002017551.49350')
 
         got = reconciler.parse_raw_obj(
             {'name': "2:/AUTH_bob/con/obj",
@@ -167,7 +167,7 @@ class TestReconcilerUtils(unittest.TestCase):
         self.assertEqual(got['account'], 'AUTH_bob')
         self.assertEqual(got['container'], 'con')
         self.assertEqual(got['obj'], 'obj')
-        self.assertEqual(got['q_timestamp'], 1234.20190)
+        self.assertEqual(got['q_timestamp'], '0000001234.20190')
 
     def test_get_oldest_storage_policy_index(self):
         mock_path = 'swift.container.reconciler.direct_head_container'
@@ -281,8 +281,8 @@ class TestReconciler(unittest.TestCase):
 
     def test_object_move(self):
         self._mock_listing({
-            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3618.841878,
-            (1, "/AUTH_bob/c/o1"): 3618.841878,
+            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3618.84187,
+            (1, "/AUTH_bob/c/o1"): 3618.84187,
         })
         self._mock_oldest_spi({'c': 0})
         deleted_container_entries = self._run_once()
@@ -311,19 +311,19 @@ class TestReconciler(unittest.TestCase):
 
         # we PUT the object in the right place with its original timestamp
         self.assertEqual(
-            put_headers.get('X-Timestamp'), '3618.841878')
+            put_headers.get('X-Timestamp'), '3618.84187')
         # we DELETE the object from the wrong place with a slightly newer
         # timestamp to make sure the change takes effect
         self.assertEqual(
-            delete_headers.get('X-Timestamp'), '3618.841879')
+            delete_headers.get('X-Timestamp'), '3618.84188')
         # and when we're done, we clean up the container listings
         self.assertEqual(deleted_container_entries,
                          [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
 
     def test_object_enqueued_for_the_correct_dest_noop(self):
         self._mock_listing({
-            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3618.841878,
-            (1, "/AUTH_bob/c/o1"): 3618.841878,
+            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3618.84187,
+            (1, "/AUTH_bob/c/o1"): 3618.84187,
         })
         self._mock_oldest_spi({'c': 1})
         deleted_container_entries = self._run_once()
@@ -370,47 +370,11 @@ class TestReconciler(unittest.TestCase):
         self.assertEqual(deleted_container_entries,
                          [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
 
-    def test_object_move_src_object_tiny_bit_newer_than_queue_entry(self):
-        self._mock_listing({
-            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3600.123456,
-            (1, '/AUTH_bob/c/o1'): 3600.1234561,  # tiny bit newer
-        })
-        self._mock_oldest_spi({'c': 0})
-        deleted_container_entries = self._run_once()
-
-        self.maxDiff = None
-        self.assertEqual(
-            self.fake_swift.calls,
-            [('GET', '/v1/.misplaced_objects' + listing_qs('')),
-             ('GET', '/v1/.misplaced_objects/3600' + listing_qs('')),
-             ('GET', '/v1/.misplaced_objects/3600' +
-              listing_qs('1:/AUTH_bob/c/o1')),
-             ('DELETE', '/v1/.misplaced_objects/3600'),
-             ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
-        self.assertEqual(
-            self.fake_swift.storage_policy[0].calls,
-            [('HEAD', '/v1/AUTH_bob/c/o1'),
-             ('PUT', '/v1/AUTH_bob/c/o1')])
-        put_headers = self.fake_swift.storage_policy[0].headers[1]
-        self.assertEqual(
-            self.fake_swift.storage_policy[1].calls,
-            [('GET', '/v1/AUTH_bob/c/o1'),
-             ('DELETE', '/v1/AUTH_bob/c/o1')])
-        delete_headers = self.fake_swift.storage_policy[1].headers[1]
-
-        self.assertEqual(
-            put_headers.get('X-Timestamp'), '3600.1234561')
-        self.assertEqual(
-            delete_headers.get('X-Timestamp'), '3600.1234571')
-
-        self.assertEqual(deleted_container_entries,
-                         [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
-
     def test_object_move_src_object_older_than_queue_entry(self):
         # should be some sort of retry case
         self._mock_listing({
-            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3600.123456,
-            (1, '/AUTH_bob/c/o1'): 3589.123456,  # slightly older
+            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3600.12345,
+            (1, '/AUTH_bob/c/o1'): 3589.12344,  # slightly older
         })
         self._mock_oldest_spi({'c': 0})
         deleted_container_entries = self._run_once()
@@ -433,37 +397,6 @@ class TestReconciler(unittest.TestCase):
 
         # we'll have to try again later
         self.assertEqual(deleted_container_entries, [])
-
-    def test_object_move_src_object_tiny_bit_older_than_queue_entry(self):
-        # should be some sort of retry case
-        self._mock_listing({
-            (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3600.123456,
-            (1, '/AUTH_bob/c/o1'): 3600.123455,  # tiny bit older
-        })
-        self._mock_oldest_spi({'c': 0})
-        deleted_container_entries = self._run_once()
-
-        self.maxDiff = None
-        self.assertEqual(
-            self.fake_swift.calls,
-            [('GET', '/v1/.misplaced_objects' + listing_qs('')),
-             ('GET', '/v1/.misplaced_objects/3600' + listing_qs('')),
-             ('GET', '/v1/.misplaced_objects/3600' +
-              listing_qs('1:/AUTH_bob/c/o1')),
-             ('DELETE', '/v1/.misplaced_objects/3600'),
-             ('GET', '/v1/.misplaced_objects' + listing_qs('3600'))])
-        self.assertEqual(
-            self.fake_swift.storage_policy[0].calls,
-            [('HEAD', '/v1/AUTH_bob/c/o1'),
-             ('PUT', '/v1/AUTH_bob/c/o1')])
-        self.assertEqual(
-            self.fake_swift.storage_policy[1].calls,
-            [('GET', '/v1/AUTH_bob/c/o1'),
-             ('DELETE', '/v1/AUTH_bob/c/o1')])
-
-        # it was close enough
-        self.assertEqual(deleted_container_entries,
-                         [('.misplaced_objects', '3600', '1:/AUTH_bob/c/o1')])
 
     def test_object_move_dest_object_newer_than_queue_entry(self):
         self._mock_listing({
@@ -493,7 +426,7 @@ class TestReconciler(unittest.TestCase):
         delete_headers = self.fake_swift.storage_policy[1].headers[0]
 
         self.assertEqual(
-            delete_headers.get('X-Timestamp'), '3679.201901')
+            delete_headers.get('X-Timestamp'), '3679.20191')
 
         # we cleaned up the old object, so this counts as done
         self.assertEqual(deleted_container_entries,
@@ -501,8 +434,8 @@ class TestReconciler(unittest.TestCase):
 
     def test_object_move_dest_object_older_than_queue_entry(self):
         self._mock_listing({
-            (None, "/.misplaced_objects/36000/1:/AUTH_bob/c/o1"): 36123.383925,
-            (1, "/AUTH_bob/c/o1"): 36123.383925,
+            (None, "/.misplaced_objects/36000/1:/AUTH_bob/c/o1"): 36123.38393,
+            (1, "/AUTH_bob/c/o1"): 36123.38393,
             (0, "/AUTH_bob/c/o1"): 36121.5,  # slightly older
         })
         self._mock_oldest_spi({'c': 0})
@@ -529,11 +462,11 @@ class TestReconciler(unittest.TestCase):
         put_headers = self.fake_swift.storage_policy[0].headers[1]
 
         self.assertEqual(
-            put_headers.get('X-Timestamp'), '36123.383925')
+            put_headers.get('X-Timestamp'), '36123.38393')
         # the DELETE to the wrong policy has to be slightly newer or else
         # it'll end up as a noop
         self.assertEqual(
-            delete_headers.get('X-Timestamp'), '36123.383926')
+            delete_headers.get('X-Timestamp'), '36123.38394')
 
         self.assertEqual(deleted_container_entries,
                          [('.misplaced_objects', '36000', '1:/AUTH_bob/c/o1')])
