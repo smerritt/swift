@@ -16,7 +16,7 @@
 import time
 from collections import defaultdict
 
-from eventlet import GreenPile, GreenPool
+from eventlet import GreenPile, GreenPool, Timeout
 
 from swift.common.daemon import Daemon
 from swift.common.internal_client import InternalClient, UnexpectedResponse
@@ -63,7 +63,7 @@ def direct_get_oldest_storage_policy_index(container_ring, account_name,
     def _eat_client_exception(*args):
         try:
             return direct_head_container(*args)
-        except ClientException:
+        except (ClientException, Timeout):
             pass
 
     pile = GreenPile()
@@ -90,7 +90,7 @@ def direct_delete_container_entry(container_ring, account_name, container_name,
     def _eat_client_exception(*args, **kwargs):
         try:
             return direct_delete_container_object(*args, **kwargs)
-        except ClientException:
+        except (ClientException, Timeout):
             pass
 
     pool = GreenPool()
