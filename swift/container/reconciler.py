@@ -220,12 +220,14 @@ class ContainerReconciler(Daemon):
         """
         Process every entry in the queue.
         """
-        self.logger.debug('pulling item from the queue')
+        self.logger.debug('pulling items from the queue')
         for c in self.swift.iter_containers(self.misplaced_objects_account):
             container = c['name'].encode('utf8')  # encoding here is defensive
+            self.logger.debug('looking for objects in %s', container)
             for raw_obj in self.swift.iter_objects(
                     self.misplaced_objects_account, container):
                 info = parse_raw_obj(raw_obj)
+                logging.debug('checking placement for %r', info)
                 handled_success = self.ensure_object_in_right_location(**info)
                 if handled_success:
                     self.pop_queue(container, raw_obj['name'],
