@@ -27,7 +27,7 @@ from swift.common.direct_client import ClientException
 from swift.common import swob
 from swift.common.utils import split_path
 
-from test.unit import FakeLogger, FakeRing
+from test.unit import FakeLogger, FakeRing, fake_http_connect
 from test.unit.common.middleware.helpers import FakeSwift
 
 
@@ -234,6 +234,55 @@ class TestReconcilerUtils(unittest.TestCase):
             oldest_spi = reconciler.direct_get_oldest_storage_policy_index(
                 self.fake_ring, 'a', 'con')
         self.assertEqual(oldest_spi, None)
+
+    def test_add_to_reconciler_queue(self):
+        mock_path = 'swift.common.direct_client.http_connect'
+        connect_args = []
+
+        def test_connect(ipaddr, port, device, partition, method, path,
+                         headers=None, query_string=None):
+            connect_args.append({
+                'ipaddr': ipaddr, 'port': port, 'device': device,
+                'partition': partition, 'method': method, 'path': path,
+                'headers': headers, 'query_string': query_string})
+
+        fake_hc = fake_http_connect(200, 200, 200, give_connect=test_connect)
+        with mock.patch(mock_path, fake_hc):
+            ret = reconciler.add_to_reconciler_queue(
+                self.fake_ring, 'a', 'c', 'o', 5948918.63946, 17)
+
+        self.assertTrue(ret)
+        self.assertEqual(len(connect_args), 3)
+        connect_args.sort(key=lambda a: (a['ipaddr'], a['port']))
+
+        self.assertEqual(connect_args[0]['headers']['X-Timestamp'],
+                         '5948918.63946')
+        self.assertEqual(connect_args[1]['headers']['X-Timestamp'],
+                         '5948918.63946')
+        self.assertEqual(connect_args[2]['headers']['X-Timestamp'],
+                         '5948918.63946')
+
+        self.assertEqual(connect_args[0]['path'],
+                         '/.misplaced_objects/5947200/17:/a/c/o')
+        self.assertEqual(connect_args[1]['path'],
+                         '/.misplaced_objects/5947200/17:/a/c/o')
+        self.assertEqual(connect_args[2]['path'],
+                         '/.misplaced_objects/5947200/17:/a/c/o')
+
+    def test_add_to_reconciler_queue_fails(self):
+        mock_path = 'swift.common.direct_client.http_connect'
+
+        fake_connects = [fake_http_connect(200),
+                         fake_http_connect(200, raise_timeout_exc=True),
+                         fake_http_connect(507)]
+
+        def fake_hc(*a, **kw):
+            return fake_connects.pop()(*a, **kw)
+
+        with mock.patch(mock_path, fake_hc):
+            ret = reconciler.add_to_reconciler_queue(
+                self.fake_ring, 'a', 'c', 'o', 5948918.63946, 17)
+        self.assertFalse(ret)
 
 
 def listing_qs(marker):
