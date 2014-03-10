@@ -16,6 +16,8 @@
 import sys
 
 from eventlet import GreenPool
+import eventlet.debug
+eventlet.debug.hub_exceptions(True)
 
 from swift.common.direct_client import (direct_put_container_object,
                                         ClientException)
@@ -30,21 +32,12 @@ def direct_put_container_entry(container_ring, account_name, container_name,
     in the listing. Does not talk to object servers; use this only when a
     container entry does not actually have a corresponding object.
     """
-
-    def _eat_client_exception(*args, **kwargs):
-        try:
-            return direct_put_container_object(*args, **kwargs)
-        except ClientException:
-            pass
-
     pool = GreenPool()
     part, nodes = container_ring.get_nodes(account_name, container_name)
     for node in nodes:
-        pool.spawn(_eat_client_exception, node, part, account_name,
-                   container_name, object_name, headers=headers)
+        pool.spawn_n(direct_put_container_object, node, part, account_name,
+                     container_name, object_name, headers=headers)
 
-    # This either worked or it didn't; if it didn't, we'll retry on the next
-    # reconciler loop when we see the queue entry again.
     pool.waitall()
 
 

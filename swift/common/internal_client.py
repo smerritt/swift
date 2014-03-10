@@ -122,6 +122,25 @@ class CompressingFileReader(object):
         self.set_initial_state()
 
 
+def pipeline_property(name):
+
+    cache_attr_name = '_%s' % name
+
+    def getter(self):
+        app = self  # first app is on self
+        while not getattr(self, cache_attr_name, None):
+            app = getattr(app, 'app', None)
+            if not app:
+                raise AttributeError('No apps in pipeline have a '
+                                     'container_ring attribute')
+            real_attr = getattr(app, 'container_ring', None)
+            setattr(self, cache_attr_name, real_attr)
+        return getattr(self, cache_attr_name)
+
+    return property(getter)
+
+
+
 class InternalClient(object):
     """
     An internal client that uses a swift proxy app to make requests to Swift.
@@ -138,6 +157,10 @@ class InternalClient(object):
         self.app = loadapp('config:' + conf_path)
         self.user_agent = user_agent
         self.request_tries = request_tries
+
+    object_ring = pipeline_property('object_ring')
+    container_ring = pipeline_property('container_ring')
+    account_ring = pipeline_property('account_ring')
 
     def make_request(
             self, method, path, headers, acceptable_statuses, body_file=None):

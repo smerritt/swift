@@ -279,6 +279,13 @@ class TestReconciler(unittest.TestCase):
         return [c[1][1:4] for c in
                 mocks['direct_delete_container_entry'].mock_calls]
 
+    def test_invalid_queue_name(self):
+        self._mock_listing({
+            (None, "/.misplaced_objects/3600/bogus"): 3618.84187,
+        })
+        self._run_once()
+        self.assertEqual(self.reconciler.stats['invalid_record'], 1)
+
     def test_object_move(self):
         self._mock_listing({
             (None, "/.misplaced_objects/3600/1:/AUTH_bob/c/o1"): 3618.84187,
