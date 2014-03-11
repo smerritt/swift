@@ -2339,6 +2339,52 @@ class InputProxy(object):
         return line
 
 
+class LoadSheddingGreenPool(object):
+    """
+    Run up to N distinct tasks concurrently in greenthreads.
+
+    If you try to run another task when N are already running, the new one
+    will be discarded.
+
+    If you try to run a second instance of an already-running task, the new
+    one will be discarded.
+    """
+    def __init__(self, size):
+        self.size = size
+        self.pool = GreenPool(size)
+        self._processing = set()
+
+    def spawn(self, task_key, func, *args, **kwargs):
+        """
+        Run func(args), but only if we're not already running one, and only if
+        we're not already running too many things.
+
+        :param task_key: hashable value that uniquely identifies the task
+        :param func: function to run
+        :param *args: arguments to pass to function
+        :param *kwargs: keyword arguments to pass to function
+
+        :returns: the greenthread running the function, or None if no
+                  greenthread was spawned.
+        """
+        if task_key in self._processing:
+            return None
+        if len(self._processing) == self.size:
+            return None
+
+        def _go(*a, **kw):
+            try:
+                return func(*a, **kw)
+            finally:
+                self._processing.discard(task_key)
+
+        self._processing.add(task_key)
+        return self.pool.spawn(_go, *args, **kwargs)
+
+    def waitall(self):
+        return self.pool.waitall()
+
+
 def tpool_reraise(func, *args, **kwargs):
     """
     Hack to work around Eventlet's tpool not catching and reraising Timeouts.

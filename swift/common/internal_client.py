@@ -542,7 +542,7 @@ class InternalClient(object):
     # object methods
 
     def delete_object(
-            self, account, container, obj,
+            self, account, container, obj, headers=None,
             acceptable_statuses=(2, HTTP_NOT_FOUND)):
         """
         Deletes an object.
@@ -559,8 +559,10 @@ class InternalClient(object):
                            unexpected way.
         """
 
+        if headers is None:
+            headers = {}
         path = self.make_path(account, container, obj)
-        self.make_request('DELETE', path, {}, acceptable_statuses)
+        self.make_request('DELETE', path, headers, acceptable_statuses)
 
     def get_object_metadata(
             self, account, container, obj, metadata_prefix='',
@@ -587,6 +589,17 @@ class InternalClient(object):
 
         path = self.make_path(account, container, obj)
         return self._get_metadata(path, metadata_prefix, acceptable_statuses)
+
+    def get_object(self, account, container, obj, headers,
+                   acceptable_statuses=(2,)):
+        """
+        Returns a 3-tuple (status, headers, iterator of object body)
+        """
+
+        headers = headers or {}
+        path = self.make_path(account, container, obj)
+        resp = self.make_request('GET', path, headers, acceptable_statuses)
+        return (resp.status_int, resp.headers, resp.app_iter)
 
     def iter_object_lines(
             self, account, container, obj, headers=None,

@@ -2979,5 +2979,53 @@ class TestGreenAsyncPile(unittest.TestCase):
         self.assertEqual(completed[0], 2)
 
 
+class TestLoadSheddingGreenPool(unittest.TestCase):
+    def test_runs_things(self):
+        pool = utils.LoadSheddingGreenPool(20)
+        results = []
+
+        pool.spawn('add1', results.append, 1)
+        pool.spawn('add2', results.append, 2)
+        pool.spawn('add3', results.append, 3)
+        pool.waitall()
+
+        self.assertEqual(sorted(results), [1, 2, 3])
+
+    def test_shedding_on_task_key(self):
+        pool = utils.LoadSheddingGreenPool(20)
+        results = []
+
+        pool.spawn('add1', results.append, 1)
+        pool.spawn('add1', results.append, 1)
+        pool.waitall()
+
+        self.assertEqual(results, [1])
+
+    def test_shedding_on_load(self):
+        pool = utils.LoadSheddingGreenPool(2)
+        results = []
+
+        pool.spawn('add1', results.append, 1)
+        pool.spawn('add2', results.append, 2)
+        pool.spawn('add3', results.append, 3)
+        pool.waitall()
+
+        self.assertEqual(results, [1, 2])
+
+    def test_returns_greenthread(self):
+        pool = utils.LoadSheddingGreenPool(2)
+        h = {'a': 1, 'b': 2}
+        results = []
+
+        def linkfunc(gt):
+            results.append(gt.wait())
+
+        greenthread = pool.spawn('p', h.pop, 'a')
+        greenthread.link(linkfunc)
+        pool.waitall()
+
+        self.assertEqual(results, [1])
+
+
 if __name__ == '__main__':
     unittest.main()
