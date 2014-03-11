@@ -24,6 +24,8 @@ from eventlet import Timeout
 
 import swift.common.db
 from swift.container.backend import ContainerBroker
+from swift.container.reconciler import add_to_reconciler_queue, \
+    slightly_later_timestamp
 from swift.common.db import DatabaseAlreadyExists
 from swift.common.container_sync_realms import ContainerSyncRealms
 from swift.common.request_helpers import get_param, get_listing_content_type, \
@@ -52,11 +54,29 @@ class ContainerReplicatorRpc(ReplicatorRpc):
     Handle the container-specific parts of REPLICATE calls
     """
 
-    def sync(self, borker, args):
+    def sync(self, broker, args):
+        sender_created_at = args[3]
         try:
-            storage_policy_index = int(args[7])
+            # pre-storage-policy code sends a 7-tuple, so this fails, but we
+            # can treat it as though they sent policy 0
+            sender_storage_policy_index = int(args[7])
         except IndexError:
-            storage_policy_index = 0
+            sender_storage_policy_index = 0
+
+        info = broker.get_info()
+        my_storage_policy_index = info['storage_policy_index']
+        my_created_at = info['created_at']
+
+        if my_storage_policy_index != sender_storage_policy_index:
+            if my_created_at > sender_created_at:
+                # The sender is older, so we'll keep their policy.
+                with broker.get() as conn:
+                    objects = broker.list_objects_iter(
+                        limit=100, marker=None, end_marker=None, prefix=None,
+                        delimiter=None)
+                    for obj in objects:
+                        add_to_reconciler_queue(where_the_fuck_do_I_get_a_container_ring)
+        
 
         # XXX this is where the magic goes
         #
@@ -64,7 +84,7 @@ class ContainerReplicatorRpc(ReplicatorRpc):
         # all our object rows in some queue somewhere. if we're the winner, we
         # need to send a message back to the caller (somehow) that makes
         # *them* enqueue all *their* rows.
-        return super(ContainerReplicatorRpc, self).sync(borker, args)
+        return super(ContainerReplicatorRpc, self).sync(broker, args)
 
 
 class ContainerController(object):
