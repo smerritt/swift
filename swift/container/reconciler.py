@@ -16,7 +16,7 @@
 import time
 from collections import defaultdict
 
-from eventlet import GreenPile, GreenPool
+from eventlet import GreenPile, GreenPool, Timeout
 
 from swift.common.daemon import Daemon
 from swift.common.internal_client import InternalClient, UnexpectedResponse
@@ -63,7 +63,7 @@ def direct_get_oldest_storage_policy_index(container_ring, account_name,
     def _eat_client_exception(*args):
         try:
             return direct_head_container(*args)
-        except ClientException:
+        except (ClientException, Timeout):
             pass
 
     pile = GreenPile()
@@ -86,12 +86,11 @@ def direct_delete_container_entry(container_ring, account_name, container_name,
     object listing. Does not talk to object servers; use this only when a
     container entry does not actually have a corresponding object.
     """
-
     pool = GreenPool()
     part, nodes = container_ring.get_nodes(account_name, container_name)
     for node in nodes:
         pool.spawn_n(direct_delete_container_object, node, part, account_name,
-                     container_name, headers=headers)
+                     container_name, object_name, headers=headers)
 
     # This either worked or it didn't; if it didn't, we'll retry on the next
     # reconciler loop when we see the queue entry again.
