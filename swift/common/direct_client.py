@@ -210,11 +210,14 @@ def direct_put_container_object(node, part, account, container, obj,
     if headers is None:
         headers = {}
 
+    have_x_timestamp = 'x-timestamp' in (k.lower() for k in headers)
+
     path = '/%s/%s/%s' % (account, container, obj)
     with Timeout(conn_timeout):
         conn = http_connect(node['ip'], node['port'], node['device'], part,
                             'PUT', path,
-                            headers=gen_headers(headers, True))
+                            headers=gen_headers(headers,
+                                                add_ts=(not have_x_timestamp)))
     with Timeout(response_timeout):
         resp = conn.getresponse()
         resp.read()

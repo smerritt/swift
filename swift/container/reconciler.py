@@ -23,7 +23,64 @@ from swift.common.internal_client import InternalClient, UnexpectedResponse
 from swift.common.utils import get_logger, split_path, quorum_size, \
     FileLikeIter, last_modified_date_to_timestamp, normalize_timestamp
 from swift.common.direct_client import direct_head_container, \
-    direct_delete_container_object, ClientException
+    direct_delete_container_object, direct_put_container_object, \
+    ClientException
+
+
+MISPLACED_OBJECTS_ACCOUNT = '.misplaced_objects'
+MISPLACED_OBJECTS_CONTAINER_DIVISOR = 3600  # 1 hour
+
+
+def add_to_reconciler_queue(container_ring, account, container, obj,
+                            obj_timestamp, obj_storage_policy_index,
+                            conn_timeout=5, response_timeout=15):
+    """
+    Add an object to the container reconciler's queue. This will cause the
+    container reconciler to move it from its current storage policy index to
+    the correct storage policy index.
+
+    :param container_ring: container ring
+    :param account: the misplaced object's account
+    :param container: the misplaced object's container
+    :param obj: the misplaced object
+    :param obj_timestamp: the misplaced object's X-Timestamp. We need this to
+                          ensure that the reconciler doesn't overwrite a newer
+                          object with an older one.
+    :param obj_storage_policy_index: the policy index where the misplaced
+                                     object currently is
+    :param conn_timeout: max time to wait for connection to container server
+    :param response_timeout: max time to wait for response from container
+                             server
+
+    :returns: True on success, False on failure. "Success" means a quorum of
+              containers got the update.
+    """
+    container_name = (
+        int(float(obj_timestamp)) // MISPLACED_OBJECTS_CONTAINER_DIVISOR *
+        MISPLACED_OBJECTS_CONTAINER_DIVISOR)
+    object_name = "%(spi)d:/%(acc)s/%(con)s/%(obj)s" % {
+        'spi': obj_storage_policy_index, 'acc': account,
+        'con': container, 'obj': obj}
+    headers = {'X-Timestamp': obj_timestamp}
+
+    def _check_success(*args, **kwargs):
+        try:
+            direct_put_container_object(*args, **kwargs)
+            return 1
+        except (ClientException, Timeout):
+            return 0
+
+    pile = GreenPile()
+    part, nodes = container_ring.get_nodes(MISPLACED_OBJECTS_ACCOUNT,
+                                           container_name)
+    for node in nodes:
+        pile.spawn(_check_success, node, part, MISPLACED_OBJECTS_ACCOUNT,
+                   container_name, object_name, headers=headers,
+                   conn_timeout=conn_timeout,
+                   response_timeout=response_timeout)
+
+    successes = sum(pile)
+    return successes >= quorum_size(len(nodes))
 
 
 def slightly_later_timestamp(ts):
@@ -110,7 +167,6 @@ class ContainerReconciler(Daemon):
             '/etc/swift/container-reconciler.conf'
         self.logger = get_logger(conf, log_route='container-reconciler')
         request_tries = int(conf.get('request_tries') or 3)
-        self.misplaced_objects_account = '.misplaced_objects'
         self.swift = InternalClient(conf_path,
                                     'Swift Container Reconciler',
                                     request_tries)
@@ -127,7 +183,7 @@ class ContainerReconciler(Daemon):
         self.logger.debug('deleting %s (%s) from the queue', obj, q_timestamp)
         headers = {'X-Timestamp': slightly_later_timestamp(q_timestamp)}
         direct_delete_container_entry(
-            self.swift.container_ring, self.misplaced_objects_account,
+            self.swift.container_ring, MISPLACED_OBJECTS_ACCOUNT,
             container, obj, headers=headers)
 
     def throw_tombstones(self, account, container, obj, timestamp,
@@ -232,11 +288,11 @@ class ContainerReconciler(Daemon):
         Process every entry in the queue.
         """
         self.logger.debug('pulling items from the queue')
-        for c in self.swift.iter_containers(self.misplaced_objects_account):
+        for c in self.swift.iter_containers(MISPLACED_OBJECTS_ACCOUNT):
             container = c['name'].encode('utf8')  # encoding here is defensive
             self.logger.debug('looking for objects in %s', container)
             for raw_obj in self.swift.iter_objects(
-                    self.misplaced_objects_account, container):
+                    MISPLACED_OBJECTS_ACCOUNT, container):
                 try:
                     info = parse_raw_obj(raw_obj)
                 except Exception:
@@ -260,6 +316,6 @@ class ContainerReconciler(Daemon):
             # deletions haven't made it everywhere or something.
             self.logger.debug('finished container %s', container)
             self.swift.delete_container(
-                self.misplaced_objects_account, container,
+                MISPLACED_OBJECTS_ACCOUNT, container,
                 acceptable_statuses=(2, 404, 409, 412))
         self.log_stats()
