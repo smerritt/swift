@@ -19,8 +19,7 @@ from eventlet import GreenPool
 import eventlet.debug
 eventlet.debug.hub_exceptions(True)
 
-from swift.common.direct_client import (direct_put_container_object,
-                                        ClientException)
+from swift.common.direct_client import direct_put_container_object
 from swift.common.ring import Ring
 from swift.common.utils import normalize_timestamp
 
@@ -54,6 +53,7 @@ def enqueue(container_ring, spi, path, timestamp):
     direct_put_container_entry(container_ring,
                                '.misplaced_objects', container, obj,
                                headers=headers)
+
 
 def main():
     try:

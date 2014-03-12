@@ -140,7 +140,6 @@ def pipeline_property(name):
     return property(getter)
 
 
-
 class InternalClient(object):
     """
     An internal client that uses a swift proxy app to make requests to Swift.
