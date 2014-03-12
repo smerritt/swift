@@ -40,6 +40,7 @@ from swift.common.bufferedhttp import http_connect
 from swift.common.exceptions import ConnectionTimeout
 from swift.common.db_replicator import ReplicatorRpc
 from swift.common.http import HTTP_NOT_FOUND, is_success
+from swift.common.ring import Ring
 from swift.common.storage_policy import POLICIES, POLICY_INDEX
 from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPConflict, \
     HTTPCreated, HTTPInternalServerError, HTTPNoContent, HTTPNotFound, \
@@ -54,7 +55,19 @@ class ContainerReplicatorRpc(ReplicatorRpc):
     Handle the container-specific parts of REPLICATE calls
     """
 
+    def __init__(self, *args, **kwargs):
+        self.swift_dir = kwargs.pop('swift_dir')
+        super(ContainerReplicatorRpc, self).__init__(*args, **kwargs)
+
+    def get_container_ring(self):
+        """Lazy-load the container ring."""
+        if not self.container_ring:
+            self.container_ring = Ring(self.swift_dir, ring_name='container')
+        return self.container_ring
+
     def sync(self, broker, args):
+        # XXX this is entirely untested
+
         sender_created_at = args[3]
         try:
             # pre-storage-policy code sends a 7-tuple, so this fails, but we
@@ -70,20 +83,32 @@ class ContainerReplicatorRpc(ReplicatorRpc):
         if my_storage_policy_index != sender_storage_policy_index:
             if my_created_at > sender_created_at:
                 # The sender is older, so we'll keep their policy.
-                with broker.get() as conn:
-                    objects = broker.list_objects_iter(
-                        limit=100, marker=None, end_marker=None, prefix=None,
-                        delimiter=None)
+                objects = broker.list_objects_iter(
+                    limit=100, marker=None, end_marker=None,
+                    prefix=None, delimiter=None)
+                while objects:
                     for obj in objects:
-                        add_to_reconciler_queue(where_the_fuck_do_I_get_a_container_ring)
-        
+                        obj_name = obj[0]
+                        obj_ts = obj[1]
+                        added = add_to_reconciler_queue(
+                            self.get_container_ring(), broker.account,
+                            broker.container, obj_name, obj_ts,
+                            my_storage_policy_index)
+                        if not added:
+                            raise Exception("fuck a duck")
+                        broker.delete_object(
+                            obj_name,
+                            slightly_later_timestamp(obj_ts))
+                    objects = broker.list_objects_iter(
+                        limit=100, marker=None, end_marker=None,
+                        prefix=None, delimiter=None)
+                broker.set_storage_policy_index(sender_storage_policy_index)
+            else:
+                # I'm older, so tell the sender to take my policy.
+                #
+                # XXX write me
+                return
 
-        # XXX this is where the magic goes
-        #
-        # if we're the loser in the policy-waving contest, we need to enqueue
-        # all our object rows in some queue somewhere. if we're the winner, we
-        # need to send a message back to the caller (somehow) that makes
-        # *them* enqueue all *their* rows.
         return super(ContainerReplicatorRpc, self).sync(broker, args)
 
 
@@ -117,9 +142,10 @@ class ContainerController(object):
             h.strip()
             for h in conf.get('allowed_sync_hosts', '127.0.0.1').split(',')
             if h.strip()]
+        self.swift_dir = conf.get('swift_dir', '/etc/swift')
         self.replicator_rpc = ContainerReplicatorRpc(
             self.root, DATADIR, ContainerBroker, self.mount_check,
-            logger=self.logger)
+            logger=self.logger, swift_dir=self.swift_dir)
         self.auto_create_account_prefix = \
             conf.get('auto_create_account_prefix') or '.'
         if config_true_value(conf.get('allow_versions', 'f')):

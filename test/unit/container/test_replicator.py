@@ -13,10 +13,13 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import mock
+import os
 import unittest
 from ConfigParser import ConfigParser
-from test.unit import patch_policies
-from swift.container import replicator
+from tempfile import mkdtemp
+from test.unit import patch_policies, FakeLogger
+from swift.container import backend, replicator, server
 from swift.common.utils import normalize_timestamp
 from swift.common.storage_policy import StoragePolicy, parse_storage_policies
 
@@ -83,6 +86,86 @@ class TestReplicator(unittest.TestCase):
             self.assertEqual(sync_args, [
                 '_max_row', '_hash', '_id', '_created_at', '_put_timestamp',
                 '_delete_timestamp', '_metadata', '_storage_policy_index'])
+
+
+class TestReplicatorRpc(unittest.TestCase):
+    def setUp(self):
+        self.testdir = os.path.join(mkdtemp(), 'cuddleable-decorticator')
+        self.replicator_rpc = server.ContainerReplicatorRpc(
+            self.testdir, 'containers', backend.ContainerBroker,
+            mount_check=False, logger=FakeLogger(),
+            swift_dir='/etc/swift')
+        self.replicator_rpc.container_ring = 'fake container ring'
+
+    def test_replication_older_storage_policy(self):
+        broker = backend.ContainerBroker(':memory:', account='a',
+                                         container='c')
+        broker.initialize(normalize_timestamp('9000'), 16)
+
+        broker.put_object('o1', normalize_timestamp(15000), 0, 'text/plain',
+                          'd41d8cd98f00b204e9800998ecf8427e')
+        broker.put_object('o2', normalize_timestamp(15001), 0, 'text/plain',
+                          'd41d8cd98f00b204e9800998ecf8427e')
+
+        sync_args = ['_max_row', '_hash', '_id', normalize_timestamp(8999),
+                     '_put_timestamp', '_delete_timestamp', '{}', 12]
+
+        atrq = 'swift.container.server.add_to_reconciler_queue'
+        with mock.patch(atrq) as mock_atrq:
+            mock_atrq.return_value = True
+            self.replicator_rpc.sync(broker, sync_args)
+
+        self.assertEqual(len(mock_atrq.mock_calls), 2)
+        # enqueued the objects for moving
+        self.assertEqual(
+            mock_atrq.mock_calls[0][1],
+            ('fake container ring', 'a', 'c', 'o1',
+             normalize_timestamp(15000), 16))
+        self.assertEqual(
+            mock_atrq.mock_calls[1][1],
+            ('fake container ring', 'a', 'c', 'o2',
+             normalize_timestamp(15001), 16))
+
+        # we took the objects out of our listing
+        self.assertEqual(
+            len(broker.list_objects_iter(10000, None, None, None, None)), 0)
+        # and switched our storage policy to the other one
+        self.assertEqual(broker.get_info()['storage_policy_index'], 12)
+
+    def test_replication_older_storage_policy_abort_on_failure(self):
+        broker = backend.ContainerBroker(':memory:', account='a',
+                                         container='c')
+        broker.initialize(normalize_timestamp('9000'), 16)
+
+        broker.put_object('o1', normalize_timestamp(15000), 0, 'text/plain',
+                          'd41d8cd98f00b204e9800998ecf8427e')
+        broker.put_object('o2', normalize_timestamp(15001), 0, 'text/plain',
+                          'd41d8cd98f00b204e9800998ecf8427e')
+
+        sync_args = ['_max_row', '_hash', '_id', normalize_timestamp(8999),
+                     '_put_timestamp', '_delete_timestamp', '{}', 12]
+
+        atrq = 'swift.container.server.add_to_reconciler_queue'
+        with mock.patch(atrq) as mock_atrq:
+            mock_atrq.side_effect = [True, False]  # succeed then fail
+            self.assertRaises(Exception, self.replicator_rpc.sync,
+                              broker, sync_args)
+
+        self.assertEqual(len(mock_atrq.mock_calls), 2)
+        self.assertEqual(
+            mock_atrq.mock_calls[0][1],
+            ('fake container ring', 'a', 'c', 'o1',
+             normalize_timestamp(15000), 16))
+        self.assertEqual(
+            mock_atrq.mock_calls[1][1],
+            ('fake container ring', 'a', 'c', 'o2',
+             normalize_timestamp(15001), 16))
+
+        # we took only one object out of our listing
+        self.assertEqual(
+            len(broker.list_objects_iter(10000, None, None, None, None)), 1)
+        # and our storage policy was unchanged
+        self.assertEqual(broker.get_info()['storage_policy_index'], 16)
 
 
 if __name__ == '__main__':
