@@ -371,7 +371,10 @@ class Replicator(Daemon):
             response = http.replicate('sync', *sync_args)
         if not response:
             return False
-        elif response.status == HTTP_NOT_FOUND:  # completely missing, rsync
+        return self._handle_sync_response(node, response, info, broker, http)
+
+    def _handle_sync_response(self, node, response, info, broker, http):
+        if response.status == HTTP_NOT_FOUND:  # completely missing, rsync
             self.stats['rsync'] += 1
             self.logger.increment('rsyncs')
             return self._rsync_db(broker, node, http, info['id'])

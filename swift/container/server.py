@@ -52,19 +52,21 @@ class ContainerReplicatorRpc(ReplicatorRpc):
     Handle the container-specific parts of REPLICATE calls
     """
 
-    def sync(self, borker, args):
+    def sync(self, broker, args):
         try:
-            storage_policy_index = int(args[7])
+            sender_storage_policy_index = int(args[7])
         except IndexError:
-            storage_policy_index = 0
+            # pre-storage-policy code sends a 7-tuple, but we can treat it as
+            # though they sent policy 0
+            sender_storage_policy_index = 0
 
-        # XXX this is where the magic goes
-        #
-        # if we're the loser in the policy-waving contest, we need to enqueue
-        # all our object rows in some queue somewhere. if we're the winner, we
-        # need to send a message back to the caller (somehow) that makes
-        # *them* enqueue all *their* rows.
-        return super(ContainerReplicatorRpc, self).sync(borker, args)
+        my_storage_policy_index = broker.get_info()['storage_policy_index']
+        if my_storage_policy_index != sender_storage_policy_index:
+            # We can't take anything from the sender since the policies don't
+            # match.
+            return HTTPConflict(headers={'Content-Type': 'application/json'},
+                                body=json.dumps(broker.get_replication_info()))
+        return super(ContainerReplicatorRpc, self).sync(broker, args)
 
 
 class ContainerController(object):
