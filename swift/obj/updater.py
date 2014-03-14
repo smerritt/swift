@@ -30,9 +30,10 @@ from swift.common.storage_policy import POLICY_INDEX
 from swift.common.utils import get_logger, renamer, write_pickle, \
     dump_recon_cache, config_true_value, ismount
 from swift.common.daemon import Daemon
+from swift.container.reconciler import add_to_reconciler_queue
 from swift.obj.diskfile import get_async_dir, ASYNCDIR_BASE
 from swift.common.http import is_success, HTTP_NOT_FOUND, \
-    HTTP_INTERNAL_SERVER_ERROR
+    HTTP_CONFLICT, HTTP_INTERNAL_SERVER_ERROR
 
 
 class ObjectUpdater(Daemon):
@@ -184,8 +185,8 @@ class ObjectUpdater(Daemon):
                         self.logger.increment("unlinks")
                         os.unlink(update_path)
                     else:
-                        self.process_object_update(update_path, device,
-                                                   policy_idx)
+                        self.process_object_update(
+                            update_path, device, timestamp, policy_idx)
                         last_obj_hash = obj_hash
                     time.sleep(self.slowdown)
                 try:
@@ -194,12 +195,14 @@ class ObjectUpdater(Daemon):
                     pass
             self.logger.timing_since('timing', start_time)
 
-    def process_object_update(self, update_path, device, policy_idx):
+    def process_object_update(self, update_path, device, timestamp,
+                              policy_idx):
         """
         Process the object information to be updated and update.
 
         :param update_path: path to pickled object update file
         :param device: path to device
+        :param timestamp: object update's timestamp
         :param policy_idx: storage policy index of object update
         """
         try:
@@ -219,17 +222,23 @@ class ObjectUpdater(Daemon):
               (update['account'], update['container'], update['obj'])
         success = True
         new_successes = False
+        statuses = []
         for node in nodes:
             if node['id'] not in successes:
                 headers = update['headers'].copy()
                 headers[POLICY_INDEX] = str(policy_idx)
                 status = self.object_update(node, part, update['op'], obj,
                                             headers)
+                statuses.append(status)
                 if not is_success(status) and status != HTTP_NOT_FOUND:
                     success = False
                 else:
                     successes.append(node['id'])
                     new_successes = True
+        if all(s == HTTP_CONFLICT for s in statuses):
+            success = add_to_reconciler_queue(
+                self.get_container_ring(), update['account'],
+                update['container'], update['obj'], timestamp, policy_idx)
         if success:
             self.successes += 1
             self.logger.increment('successes')

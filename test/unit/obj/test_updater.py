@@ -50,9 +50,9 @@ class TestObjectUpdater(unittest.TestCase):
         ring_file = os.path.join(self.testdir, 'container.ring.gz')
         with closing(GzipFile(ring_file, 'wb')) as f:
             pickle.dump(
-                RingData([[0, 1, 2, 0, 1, 2],
-                          [1, 2, 0, 1, 2, 0],
-                          [2, 3, 1, 2, 3, 1]],
+                RingData([[0, 1, 2, 0, 1, 2, 0, 1],
+                          [1, 2, 0, 1, 2, 0, 1, 2],
+                          [2, 0, 1, 2, 0, 1, 2, 0]],
                          [{'id': 0, 'ip': '127.0.0.1', 'port': 1,
                            'device': 'sda1', 'zone': 0},
                           {'id': 1, 'ip': '127.0.0.1', 'port': 1,
@@ -131,7 +131,7 @@ class TestObjectUpdater(unittest.TestCase):
             seen = set()
 
             class MockObjectUpdater(object_updater.ObjectUpdater):
-                def process_object_update(self, update_path, device, idx):
+                def process_object_update(self, update_path, device, ts, idx):
                     seen.add((update_path, idx))
                     os.unlink(update_path)
 
@@ -357,12 +357,10 @@ class TestObjectUpdater(unittest.TestCase):
             'concurrency': '1',
             'node_timeout': '15'})
 
-        async_dir = os.path.join(self.sda1, ASYNCDIR_BASE)
-        os.mkdir(async_dir)
         prefix_dir = os.path.join(self.sda1, ASYNCDIR_BASE, 'abc')
-        os.mkdir(prefix_dir)
+        os.makedirs(prefix_dir)
         async_pending_path = os.path.join(
-            prefix_dir, hash_path('a', 'c', 'o') + '99999.12345')
+            prefix_dir, hash_path('a', 'c', 'o') + '-99999.12345')
         with open(async_pending_path, 'w') as fh:
             pickle.dump({'op': 'PUT',
                          'account': 'a',
@@ -373,13 +371,52 @@ class TestObjectUpdater(unittest.TestCase):
                                      'X-Storage-Policy-Index': '0'}},
                         fh)
 
-        with mock.patch(
-                'swift.container.reconciler.add_to_reconciler_queue') as atrq:
+        with mock.patch('swift.obj.updater.add_to_reconciler_queue') as atrq:
             with mock.patch('swift.obj.updater.http_connect',
                             fake_http_connect(409, 409, 409)):
+                atrq.return_value = True  # enqueue success
                 updater.run_once()
-        self.assertEquals(atrq.mock_calls, 'blah')
+        self.assertEquals(atrq.mock_calls,
+                          [mock.call(updater.container_ring, 'a', 'c', 'o',
+                                     '99999.12345', 0)])
+        # enqueued counts as success
         self.assertFalse(os.path.exists(async_pending_path))
+
+    def test_enqueue_on_409s_fail(self):
+        # If all the container servers return 409, then we know our object is
+        # in the wrong storage policy, so we tell the reconciler to move it.
+        updater = object_updater.ObjectUpdater({
+            'devices': self.devices_dir,
+            'mount_check': 'false',
+            'swift_dir': self.testdir,
+            'interval': '1',
+            'concurrency': '1',
+            'node_timeout': '15'})
+
+        prefix_dir = os.path.join(self.sda1, ASYNCDIR_BASE, 'abc')
+        os.makedirs(prefix_dir)
+        async_pending_path = os.path.join(
+            prefix_dir, hash_path('a', 'c', 'o') + '-99999.12345')
+        with open(async_pending_path, 'w') as fh:
+            pickle.dump({'op': 'PUT',
+                         'account': 'a',
+                         'container': 'c',
+                         'obj': 'o',
+                         'headers': {'X-Container-Timestamp':
+                                     normalize_timestamp(99999.12345),
+                                     'X-Storage-Policy-Index': '0'}},
+                        fh)
+
+        with mock.patch('swift.obj.updater.add_to_reconciler_queue') as atrq:
+            with mock.patch('swift.obj.updater.http_connect',
+                            fake_http_connect(409, 409, 409)):
+                atrq.return_value = False  # enqueue fails
+                updater.run_once()
+        self.assertEquals(atrq.mock_calls,
+                          [mock.call(updater.container_ring, 'a', 'c', 'o',
+                                     '99999.12345', 0)])
+        # enqueue failure counts as failure
+        self.assertTrue(os.path.exists(async_pending_path))
 
 
 if __name__ == '__main__':
