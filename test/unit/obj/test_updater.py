@@ -32,7 +32,7 @@ from swift.common.ring import RingData
 from swift.common import utils
 from swift.common.utils import hash_path, normalize_timestamp, mkdirs, \
     write_pickle
-from test.unit import FakeLogger, patch_policies
+from test.unit import FakeLogger, patch_policies, fake_http_connect
 from swift.common.storage_policy import StoragePolicy, POLICIES
 
 
@@ -345,6 +345,41 @@ class TestObjectUpdater(unittest.TestCase):
         self.assert_(not os.path.exists(op_path))
         self.assertEqual(cu.logger.get_increment_counts(),
                          {'unlinks': 1, 'successes': 1})
+
+    def test_enqueue_on_409s(self):
+        # If all the container servers return 409, then we know our object is
+        # in the wrong storage policy, so we tell the reconciler to move it.
+        updater = object_updater.ObjectUpdater({
+            'devices': self.devices_dir,
+            'mount_check': 'false',
+            'swift_dir': self.testdir,
+            'interval': '1',
+            'concurrency': '1',
+            'node_timeout': '15'})
+
+        async_dir = os.path.join(self.sda1, ASYNCDIR_BASE)
+        os.mkdir(async_dir)
+        prefix_dir = os.path.join(self.sda1, ASYNCDIR_BASE, 'abc')
+        os.mkdir(prefix_dir)
+        async_pending_path = os.path.join(
+            prefix_dir, hash_path('a', 'c', 'o') + '99999.12345')
+        with open(async_pending_path, 'w') as fh:
+            pickle.dump({'op': 'PUT',
+                         'account': 'a',
+                         'container': 'c',
+                         'obj': 'o',
+                         'headers': {'X-Container-Timestamp':
+                                     normalize_timestamp(99999.12345),
+                                     'X-Storage-Policy-Index': '0'}},
+                        fh)
+
+        with mock.patch(
+                'swift.container.reconciler.add_to_reconciler_queue') as atrq:
+            with mock.patch('swift.obj.updater.http_connect',
+                            fake_http_connect(409, 409, 409)):
+                updater.run_once()
+        self.assertEquals(atrq.mock_calls, 'blah')
+        self.assertFalse(os.path.exists(async_pending_path))
 
 
 if __name__ == '__main__':
