@@ -55,7 +55,7 @@ def add_to_reconciler_queue(container_ring, account, container, obj,
     :returns: True on success, False on failure. "Success" means a quorum of
               containers got the update.
     """
-    container_name = (
+    container_name = str(
         int(float(obj_timestamp)) // MISPLACED_OBJECTS_CONTAINER_DIVISOR *
         MISPLACED_OBJECTS_CONTAINER_DIVISOR)
     object_name = "%(spi)d:/%(acc)s/%(con)s/%(obj)s" % {
