@@ -742,6 +742,7 @@ class TestObjectController(unittest.TestCase):
                             environ={'REQUEST_METHOD': 'HEAD'})
         resp = req.get_response(self.object_controller)
         self.assertEquals(resp.status_int, 404)
+        self.assertFalse('X-Timestamp' in resp.headers)
 
         timestamp = normalize_timestamp(time())
         req = Request.blank(
@@ -804,6 +805,7 @@ class TestObjectController(unittest.TestCase):
                             environ={'REQUEST_METHOD': 'HEAD'})
         resp = req.get_response(self.object_controller)
         self.assertEquals(resp.status_int, 404)
+        self.assertEquals(resp.headers['X-Timestamp'], timestamp)
 
     def test_HEAD_quarantine_zbyte(self):
         # Test swift.obj.server.ObjectController.GET
@@ -845,6 +847,7 @@ class TestObjectController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.object_controller)
         self.assertEquals(resp.status_int, 404)
+        self.assertFalse('X-Timestamp' in resp.headers)
 
         timestamp = normalize_timestamp(time())
         req = Request.blank('/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
@@ -926,6 +929,7 @@ class TestObjectController(unittest.TestCase):
         req = Request.blank('/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'GET'})
         resp = req.get_response(self.object_controller)
         self.assertEquals(resp.status_int, 404)
+        self.assertEquals(resp.headers['X-Timestamp'], timestamp)
 
     def test_GET_if_match(self):
         req = Request.blank('/sda1/p/a/c/o', environ={'REQUEST_METHOD': 'PUT'},
