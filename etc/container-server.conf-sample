@@ -162,3 +162,5 @@ use = egg:swift#recon
 #
 # Maximum amount of time to spend syncing each container per pass
 # container_time = 60
+
+[container-reconciler]

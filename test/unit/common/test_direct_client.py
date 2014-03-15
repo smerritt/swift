@@ -24,51 +24,56 @@ from swift.common.exceptions import ClientException
 from swift.common.utils import json
 
 
+class FakeConn(object):
+
+    def __init__(self, status, fake_headers, body, *args, **kwargs):
+        self.status = status
+        self.reason = 'Fake'
+        self.body = body
+        self.fake_headers = fake_headers
+        self.with_exc = False
+
+    def _update_call_args(self, *args, **kwargs):
+        self.host = args[0]
+        self.port = args[1]
+        self.method = args[4]
+        self.path = args[5]
+        self.headers = kwargs.get('headers', {})
+        self.etag = md5()
+        return self
+
+    def getresponse(self):
+        if self.with_exc:
+            raise Exception('test')
+
+        if self.fake_headers is not None and self.method == 'POST':
+            self.fake_headers.append(self.headers)
+        return self
+
+    def getheader(self, header, default=None):
+        return self.headers.get(header.lower(), default)
+
+    def getheaders(self):
+        if self.fake_headers is not None:
+            for key in self.fake_headers:
+                self.headers.update({key: self.fake_headers[key]})
+        return self.headers.items()
+
+    def read(self):
+        return self.body
+
+    def send(self, data):
+        self.etag.update(data)
+        self.headers['etag'] = str(self.etag.hexdigest())
+
+    def close(self):
+        return
+
+
 def mock_http_connect(status, fake_headers=None, body=None):
-
-    class FakeConn(object):
-
-        def __init__(self, status, fake_headers, body, *args, **kwargs):
-            self.status = status
-            self.reason = 'Fake'
-            self.body = body
-            self.host = args[0]
-            self.port = args[1]
-            self.method = args[4]
-            self.path = args[5]
-            self.with_exc = False
-            self.headers = kwargs.get('headers', {})
-            self.fake_headers = fake_headers
-            self.etag = md5()
-
-        def getresponse(self):
-            if self.with_exc:
-                raise Exception('test')
-
-            if self.fake_headers is not None and self.method == 'POST':
-                self.fake_headers.append(self.headers)
-            return self
-
-        def getheader(self, header, default=None):
-            return self.headers.get(header.lower(), default)
-
-        def getheaders(self):
-            if self.fake_headers is not None:
-                for key in self.fake_headers:
-                    self.headers.update({key: self.fake_headers[key]})
-            return self.headers.items()
-
-        def read(self):
-            return self.body
-
-        def send(self, data):
-            self.etag.update(data)
-            self.headers['etag'] = str(self.etag.hexdigest())
-
-        def close(self):
-            return
-    return lambda *args, **kwargs: FakeConn(status, fake_headers, body,
-                                            *args, **kwargs)
+    fake_conn = FakeConn(status, fake_headers, body)
+    return lambda *args, **kwargs: fake_conn._update_call_args(
+        *args, **kwargs)
 
 
 class TestDirectClient(unittest.TestCase):
@@ -190,6 +195,56 @@ class TestDirectClient(unittest.TestCase):
         direct_client.http_connect = mock_http_connect(200)
 
         direct_client.direct_delete_container(node, part, account, container)
+
+        direct_client.http_connect = was_http_connector
+
+    def test_direct_put_container_object(self):
+        node = {'ip': '1.2.3.4', 'port': '6000', 'device': 'sda'}
+        part = '0'
+        account = 'a'
+        container = 'c'
+        obj = 'o'
+
+        was_http_connector = direct_client.http_connect
+        try:
+            fake_conn = FakeConn(204, None, None)
+
+            def mock_conn(*args, **kwargs):
+                return fake_conn._update_call_args(*args, **kwargs)
+            direct_client.http_connect = mock_conn
+
+            direct_client.direct_put_container_object(node, part, account,
+                                                      container, obj)
+            self.assertEqual(fake_conn.method, 'PUT')
+            # you'd expect the device and part in here, but we're mocking
+            # above bufferedhttp.http_conn
+            self.assertEqual(fake_conn.path, '/a/c/o')
+
+            # test err
+            direct_client.http_connect = mock_http_connect(500)
+            self.assertRaises(ClientException,
+                              direct_client.direct_put_container_object, node,
+                              part, account, container, obj)
+        finally:
+            direct_client.http_connect = was_http_connector
+
+    def test_direct_delete_container_object(self):
+        node = {'ip': '1.2.3.4', 'port': '6000', 'device': 'sda'}
+        part = '0'
+        account = 'a'
+        container = 'c'
+        obj = 'o'
+
+        was_http_connector = direct_client.http_connect
+        direct_client.http_connect = mock_http_connect(204)
+
+        direct_client.direct_delete_container_object(node, part, account,
+                                                     container, obj)
+
+        direct_client.http_connect = mock_http_connect(500)
+        self.assertRaises(ClientException,
+                          direct_client.direct_delete_container_object, node,
+                          part, account, container, obj)
 
         direct_client.http_connect = was_http_connector
 
