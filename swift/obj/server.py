@@ -47,6 +47,7 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPCreated, \
     HTTPInsufficientStorage, HTTPForbidden, HTTPException, HeaderKeyDict, \
     HTTPConflict
 from swift.obj.diskfile import DATAFILE_SYSTEM_META, DiskFileManager
+from swift.common.storage_policy import POLICY_INDEX
 
 
 class ObjectController(object):
@@ -150,11 +151,10 @@ class ObjectController(object):
         behavior.
         """
         return self._diskfile_mgr.get_diskfile(
-            device, partition, account, container, obj,
-            policy_idx=policy_idx, **kwargs)
+            device, partition, account, container, obj, policy_idx, **kwargs)
 
     def async_update(self, op, account, container, obj, host, partition,
-                     contdevice, headers_out, objdevice):
+                     contdevice, headers_out, objdevice, policy_idx):
         """
         Sends or saves an async update.
 
@@ -168,6 +168,7 @@ class ObjectController(object):
         :param headers_out: dictionary of headers to send in the container
                             request
         :param objdevice: device name that the object is in
+        :param policy_idx: the associated storage policy index
         """
         headers_out['user-agent'] = 'obj-server %s' % os.getpid()
         full_path = '/%s/%s/%s' % (account, container, obj)
@@ -198,10 +199,11 @@ class ObjectController(object):
                 'obj': obj, 'headers': headers_out}
         timestamp = headers_out['x-timestamp']
         self._diskfile_mgr.pickle_async_update(objdevice, account, container,
-                                               obj, data, timestamp)
+                                               obj, data, timestamp,
+                                               policy_idx)
 
     def container_update(self, op, account, container, obj, request,
-                         headers_out, objdevice):
+                         headers_out, objdevice, policy_idx):
         """
         Update the container when objects are updated.
 
@@ -238,10 +240,11 @@ class ObjectController(object):
 
         headers_out['x-trans-id'] = headers_in.get('x-trans-id', '-')
         headers_out['referer'] = request.as_referer()
+        headers_out[POLICY_INDEX.lower()] = str(policy_idx)
         for conthost, contdevice in updates:
             self.async_update(op, account, container, obj, conthost,
                               contpartition, contdevice, headers_out,
-                              objdevice)
+                              objdevice, policy_idx)
 
     def delete_at_update(self, op, delete_at, account, container, obj,
                          request, objdevice):
@@ -311,7 +314,7 @@ class ObjectController(object):
             self.async_update(
                 op, self.expiring_objects_account, delete_at_container,
                 '%s-%s/%s/%s' % (delete_at, account, container, obj),
-                host, partition, contdevice, headers_out, objdevice)
+                host, partition, contdevice, headers_out, objdevice, 0)
 
     @public
     @timing_stats()
@@ -460,7 +463,7 @@ class ObjectController(object):
                 'x-content-type': metadata['Content-Type'],
                 'x-timestamp': metadata['X-Timestamp'],
                 'x-etag': metadata['ETag']}),
-            device)
+            device, policy_idx)
         return HTTPCreated(request=request, etag=etag)
 
     @public
@@ -615,7 +618,7 @@ class ObjectController(object):
             self.container_update(
                 'DELETE', account, container, obj, request,
                 HeaderKeyDict({'x-timestamp': req_timestamp}),
-                device)
+                device, policy_idx)
         return response_class(request=request)
 
     @public

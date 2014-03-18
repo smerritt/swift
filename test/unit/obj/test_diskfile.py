@@ -753,11 +753,11 @@ class TestDiskFileManager(unittest.TestCase):
         with mock.patch('swift.obj.diskfile.write_pickle') as wp:
             self.df_mgr.pickle_async_update(self.existing_device1,
                                             'a', 'c', 'o',
-                                            dict(a=1, b=2), ts)
+                                            dict(a=1, b=2), ts, 0)
             dp = self.df_mgr.construct_dev_path(self.existing_device1)
             ohash = diskfile.hash_path('a', 'c', 'o')
             wp.assert_called_with({'a': 1, 'b': 2},
-                                  os.path.join(dp, diskfile.ASYNCDIR_BASE,
+                                  os.path.join(dp, diskfile.get_async_dir(0),
                                                ohash[-3:], ohash + '-' + ts),
                                   os.path.join(dp, 'tmp'))
         self.df_mgr.logger.increment.assert_called_with('async_pendings')

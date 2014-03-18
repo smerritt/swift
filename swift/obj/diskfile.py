@@ -527,9 +527,9 @@ class DiskFileManager(object):
             yield True
 
     def pickle_async_update(self, device, account, container, obj, data,
-                            timestamp):
+                            timestamp, policy_idx):
         device_path = self.construct_dev_path(device)
-        async_dir = os.path.join(device_path, ASYNCDIR_BASE)
+        async_dir = os.path.join(device_path, get_async_dir(policy_idx))
         ohash = hash_path(account, container, obj)
         self.threadpools[device].run_in_thread(
             write_pickle,

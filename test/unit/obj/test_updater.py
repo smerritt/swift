@@ -27,14 +27,20 @@ from distutils.dir_util import mkpath
 from eventlet import spawn, Timeout, listen
 
 from swift.obj import updater as object_updater
-from swift.obj.diskfile import ASYNCDIR_BASE
+from swift.obj.diskfile import ASYNCDIR_BASE, get_async_dir
 from swift.common.ring import RingData
 from swift.common import utils
 from swift.common.utils import hash_path, normalize_timestamp, mkdirs, \
     write_pickle
-from test.unit import FakeLogger
+from test.unit import FakeLogger, patch_policies
+from swift.common.storage_policy import StoragePolicy, POLICIES
 
 
+_mocked_policies = [StoragePolicy(0, 'zero', False),
+                    StoragePolicy(1, 'one', True)]
+
+
+@patch_policies(_mocked_policies)
 class TestObjectUpdater(unittest.TestCase):
 
     def setUp(self):
@@ -80,48 +86,84 @@ class TestObjectUpdater(unittest.TestCase):
         self.assert_(cu.get_container_ring() is not None)
 
     def test_object_sweep(self):
-        prefix_dir = os.path.join(self.sda1, ASYNCDIR_BASE, 'abc')
-        mkpath(prefix_dir)
+        def check_with_idx(index, warn, should_skip):
+            if int(index) > 0:
+                asyncdir = os.path.join(self.sda1,
+                                        ASYNCDIR_BASE + "-" + index)
+            else:
+                asyncdir = os.path.join(self.sda1, ASYNCDIR_BASE)
 
-        # A non-directory where directory is expected should just be skipped...
-        not_a_dir_path = os.path.join(self.sda1, ASYNCDIR_BASE, 'not_a_dir')
-        with open(not_a_dir_path, 'w'):
-            pass
+            prefix_dir = os.path.join(asyncdir, 'abc')
+            mkpath(prefix_dir)
 
-        objects = {
-            'a': [1089.3, 18.37, 12.83, 1.3],
-            'b': [49.4, 49.3, 49.2, 49.1],
-            'c': [109984.123],
-        }
+            # A non-directory where directory is expected should just be
+            # skipped, but should not stop processing of subsequent
+            # directories.
+            not_dirs = (
+                os.path.join(self.sda1, 'not_a_dir'),
+                os.path.join(self.sda1,
+                             ASYNCDIR_BASE + '-' + 'twentington'),
+                os.path.join(self.sda1,
+                             ASYNCDIR_BASE + '-' + str(int(index) + 100)))
 
-        expected = set()
-        for o, timestamps in objects.iteritems():
-            ohash = hash_path('account', 'container', o)
-            for t in timestamps:
-                o_path = os.path.join(prefix_dir, ohash + '-' +
-                                      normalize_timestamp(t))
-                if t == timestamps[0]:
-                    expected.add(o_path)
-                write_pickle({}, o_path)
+            for not_dir in not_dirs:
+                with open(not_dir, 'w'):
+                    pass
 
-        seen = set()
+            objects = {
+                'a': [1089.3, 18.37, 12.83, 1.3],
+                'b': [49.4, 49.3, 49.2, 49.1],
+                'c': [109984.123],
+            }
 
-        class MockObjectUpdater(object_updater.ObjectUpdater):
-            def process_object_update(self, update_path, device):
-                seen.add(update_path)
-                os.unlink(update_path)
+            expected = set()
+            for o, timestamps in objects.iteritems():
+                ohash = hash_path('account', 'container', o)
+                for t in timestamps:
+                    o_path = os.path.join(prefix_dir, ohash + '-' +
+                                          normalize_timestamp(t))
+                    if t == timestamps[0]:
+                        expected.add((o_path, int(index)))
+                    write_pickle({}, o_path)
 
-        cu = MockObjectUpdater({
-            'devices': self.devices_dir,
-            'mount_check': 'false',
-            'swift_dir': self.testdir,
-            'interval': '1',
-            'concurrency': '1',
-            'node_timeout': '5'})
-        cu.object_sweep(self.sda1)
-        self.assert_(not os.path.exists(prefix_dir))
-        self.assert_(os.path.exists(not_a_dir_path))
-        self.assertEqual(expected, seen)
+            seen = set()
+
+            class MockObjectUpdater(object_updater.ObjectUpdater):
+                def process_object_update(self, update_path, device, idx):
+                    seen.add((update_path, idx))
+                    os.unlink(update_path)
+
+            cu = MockObjectUpdater({
+                'devices': self.devices_dir,
+                'mount_check': 'false',
+                'swift_dir': self.testdir,
+                'interval': '1',
+                'concurrency': '1',
+                'node_timeout': '5'})
+            cu.logger = mock_logger = mock.MagicMock()
+            cu.object_sweep(self.sda1)
+            self.assertEquals(mock_logger.warn.call_count, warn)
+            self.assert_(os.path.exists(os.path.join(self.sda1, 'not_a_dir')))
+            if should_skip:
+                # if we were supposed to skip over the dir, we didn't process
+                # anything at all
+                self.assertTrue(os.path.exists(prefix_dir))
+                self.assertEqual(set(), seen)
+            else:
+                self.assert_(not os.path.exists(prefix_dir))
+                self.assertEqual(expected, seen)
+
+            # test cleanup: the tempdir gets cleaned up between runs, but this
+            # way we can be called multiple times in a single test method
+            for not_dir in not_dirs:
+                os.unlink(not_dir)
+
+        # first check with valid policies
+        for pol in POLICIES:
+            check_with_idx(str(pol.idx), 0, should_skip=False)
+        # now check with a bogus async dir policy and make sure we get
+        # a warning indicating that the '99' policy isn't valid
+        check_with_idx('99', 1, should_skip=True)
 
     @mock.patch.object(object_updater, 'ismount')
     def test_run_once_with_disk_unmounted(self, mock_ismount):
@@ -134,7 +176,7 @@ class TestObjectUpdater(unittest.TestCase):
             'concurrency': '1',
             'node_timeout': '15'})
         cu.run_once()
-        async_dir = os.path.join(self.sda1, ASYNCDIR_BASE)
+        async_dir = os.path.join(self.sda1, get_async_dir(0))
         os.mkdir(async_dir)
         cu.run_once()
         self.assert_(os.path.exists(async_dir))
@@ -148,12 +190,13 @@ class TestObjectUpdater(unittest.TestCase):
             'interval': '1',
             'concurrency': '1',
             'node_timeout': '15'})
-        odd_dir = os.path.join(async_dir, 'not really supposed to be here')
+        odd_dir = os.path.join(async_dir, 'not really supposed '
+                               'to be here')
         os.mkdir(odd_dir)
         cu.logger = FakeLogger()
         cu.run_once()
         self.assert_(os.path.exists(async_dir))
-        self.assert_(os.path.exists(odd_dir))  # skipped because not mounted!
+        self.assert_(os.path.exists(odd_dir))  # skipped - not mounted!
         # mount_check == True means ismount was checked
         self.assertEqual([
             mock.call(self.sda1),
@@ -171,7 +214,7 @@ class TestObjectUpdater(unittest.TestCase):
             'concurrency': '1',
             'node_timeout': '15'})
         cu.run_once()
-        async_dir = os.path.join(self.sda1, ASYNCDIR_BASE)
+        async_dir = os.path.join(self.sda1, get_async_dir(0))
         os.mkdir(async_dir)
         cu.run_once()
         self.assert_(os.path.exists(async_dir))
@@ -185,7 +228,8 @@ class TestObjectUpdater(unittest.TestCase):
             'interval': '1',
             'concurrency': '1',
             'node_timeout': '15'})
-        odd_dir = os.path.join(async_dir, 'not really supposed to be here')
+        odd_dir = os.path.join(async_dir, 'not really supposed '
+                               'to be here')
         os.mkdir(odd_dir)
         cu.run_once()
         self.assert_(os.path.exists(async_dir))
@@ -206,7 +250,8 @@ class TestObjectUpdater(unittest.TestCase):
             '%s-%s' % (ohash, normalize_timestamp(time())))
         for path in (op_path, older_op_path):
             with open(path, 'wb') as async_pending:
-                pickle.dump({'op': 'PUT', 'account': 'a', 'container': 'c',
+                pickle.dump({'op': 'PUT', 'account': 'a',
+                             'container': 'c',
                              'obj': 'o', 'headers': {
                                  'X-Container-Timestamp':
                                  normalize_timestamp(0)}},
@@ -238,7 +283,8 @@ class TestObjectUpdater(unittest.TestCase):
                         headers[line.split(':')[0].lower()] = \
                             line.split(':')[1].strip()
                         line = inc.readline()
-                    self.assert_('x-container-timestamp' in headers)
+                    self.assertTrue('x-container-timestamp' in headers)
+                    self.assertTrue('x-storage-policy-index' in headers)
             except BaseException as err:
                 return err
             return None
