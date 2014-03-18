@@ -1701,7 +1701,7 @@ class TestDiskFile(unittest.TestCase):
             self.assertRaises(
                 DiskFileDeviceUnavailable,
                 self.df_mgr.get_diskfile_from_hash,
-                'dev', '9', '9a7175077c01a23ade5956b8a2bba900')
+                'dev', '9', '9a7175077c01a23ade5956b8a2bba900', 0)
 
     def test_get_diskfile_from_hash_not_dir(self):
         self.df_mgr.get_dev_path = mock.MagicMock(return_value='/srv/dev/')
@@ -1718,7 +1718,7 @@ class TestDiskFile(unittest.TestCase):
             self.assertRaises(
                 DiskFileNotExist,
                 self.df_mgr.get_diskfile_from_hash,
-                'dev', '9', '9a7175077c01a23ade5956b8a2bba900')
+                'dev', '9', '9a7175077c01a23ade5956b8a2bba900', 0)
             quarantine_renamer.assert_called_once_with(
                 '/srv/dev/',
                 '/srv/dev/objects/9/900/9a7175077c01a23ade5956b8a2bba900')
@@ -1737,7 +1737,7 @@ class TestDiskFile(unittest.TestCase):
             self.assertRaises(
                 DiskFileNotExist,
                 self.df_mgr.get_diskfile_from_hash,
-                'dev', '9', '9a7175077c01a23ade5956b8a2bba900')
+                'dev', '9', '9a7175077c01a23ade5956b8a2bba900', 0)
 
     def test_get_diskfile_from_hash_other_oserror(self):
         self.df_mgr.get_dev_path = mock.MagicMock(return_value='/srv/dev/')
@@ -1752,7 +1752,7 @@ class TestDiskFile(unittest.TestCase):
             self.assertRaises(
                 OSError,
                 self.df_mgr.get_diskfile_from_hash,
-                'dev', '9', '9a7175077c01a23ade5956b8a2bba900')
+                'dev', '9', '9a7175077c01a23ade5956b8a2bba900', 0)
 
     def test_get_diskfile_from_hash_no_actual_files(self):
         self.df_mgr.get_dev_path = mock.MagicMock(return_value='/srv/dev/')
@@ -1766,7 +1766,7 @@ class TestDiskFile(unittest.TestCase):
             self.assertRaises(
                 DiskFileNotExist,
                 self.df_mgr.get_diskfile_from_hash,
-                'dev', '9', '9a7175077c01a23ade5956b8a2bba900')
+                'dev', '9', '9a7175077c01a23ade5956b8a2bba900', 0)
 
     def test_get_diskfile_from_hash_read_metadata_problem(self):
         self.df_mgr.get_dev_path = mock.MagicMock(return_value='/srv/dev/')
@@ -1780,7 +1780,7 @@ class TestDiskFile(unittest.TestCase):
             self.assertRaises(
                 DiskFileNotExist,
                 self.df_mgr.get_diskfile_from_hash,
-                'dev', '9', '9a7175077c01a23ade5956b8a2bba900')
+                'dev', '9', '9a7175077c01a23ade5956b8a2bba900', 0)
 
     def test_get_diskfile_from_hash_no_meta_name(self):
         self.df_mgr.get_dev_path = mock.MagicMock(return_value='/srv/dev/')
@@ -1793,7 +1793,7 @@ class TestDiskFile(unittest.TestCase):
             readmeta.return_value = {}
             try:
                 self.df_mgr.get_diskfile_from_hash(
-                    'dev', '9', '9a7175077c01a23ade5956b8a2bba900')
+                    'dev', '9', '9a7175077c01a23ade5956b8a2bba900', 0)
             except DiskFileNotExist as err:
                 exc = err
             self.assertEqual(str(exc), '')
@@ -1809,7 +1809,7 @@ class TestDiskFile(unittest.TestCase):
             readmeta.return_value = {'name': 'bad'}
             try:
                 self.df_mgr.get_diskfile_from_hash(
-                    'dev', '9', '9a7175077c01a23ade5956b8a2bba900')
+                    'dev', '9', '9a7175077c01a23ade5956b8a2bba900', 0)
             except DiskFileNotExist as err:
                 exc = err
             self.assertEqual(str(exc), '')
@@ -1824,10 +1824,10 @@ class TestDiskFile(unittest.TestCase):
             hclistdir.return_value = ['1381679759.90941.data']
             readmeta.return_value = {'name': '/a/c/o'}
             self.df_mgr.get_diskfile_from_hash(
-                'dev', '9', '9a7175077c01a23ade5956b8a2bba900')
+                'dev', '9', '9a7175077c01a23ade5956b8a2bba900', 0)
             dfclass.assert_called_once_with(
                 self.df_mgr, '/srv/dev/', self.df_mgr.threadpools['dev'], '9',
-                'a', 'c', 'o')
+                'a', 'c', 'o', policy_idx=0)
             hclistdir.assert_called_once_with(
                 '/srv/dev/objects/9/900/9a7175077c01a23ade5956b8a2bba900',
                 604800)
@@ -1862,7 +1862,7 @@ class TestDiskFile(unittest.TestCase):
         self.df_mgr.get_dev_path = mock.MagicMock(return_value=None)
         exc = None
         try:
-            list(self.df_mgr.yield_suffixes('dev', '9'))
+            list(self.df_mgr.yield_suffixes('dev', '9', 0))
         except DiskFileDeviceUnavailable as err:
             exc = err
         self.assertEqual(str(exc), '')
@@ -1871,7 +1871,7 @@ class TestDiskFile(unittest.TestCase):
         self.df_mgr._listdir = mock.MagicMock(return_value=[
             'abc', 'def', 'ghi', 'abcd', '012'])
         self.assertEqual(
-            list(self.df_mgr.yield_suffixes('dev', '9')),
+            list(self.df_mgr.yield_suffixes('dev', '9', 0)),
             [(self.testdir + '/dev/objects/9/abc', 'abc'),
              (self.testdir + '/dev/objects/9/def', 'def'),
              (self.testdir + '/dev/objects/9/012', '012')])
@@ -1880,7 +1880,7 @@ class TestDiskFile(unittest.TestCase):
         self.df_mgr.get_dev_path = mock.MagicMock(return_value=None)
         exc = None
         try:
-            list(self.df_mgr.yield_hashes('dev', '9'))
+            list(self.df_mgr.yield_hashes('dev', '9', 0))
         except DiskFileDeviceUnavailable as err:
             exc = err
         self.assertEqual(str(exc), '')
@@ -1890,7 +1890,7 @@ class TestDiskFile(unittest.TestCase):
             return []
 
         with mock.patch('os.listdir', _listdir):
-            self.assertEqual(list(self.df_mgr.yield_hashes('dev', '9')), [])
+            self.assertEqual(list(self.df_mgr.yield_hashes('dev', '9', 0)), [])
 
     def test_yield_hashes_empty_suffixes(self):
         def _listdir(path):
@@ -1898,8 +1898,8 @@ class TestDiskFile(unittest.TestCase):
 
         with mock.patch('os.listdir', _listdir):
             self.assertEqual(
-                list(self.df_mgr.yield_hashes('dev', '9', suffixes=['456'])),
-                [])
+                list(self.df_mgr.yield_hashes('dev', '9', 0,
+                                              suffixes=['456'])), [])
 
     def test_yield_hashes(self):
         fresh_ts = normalize_timestamp(time() - 10)
@@ -1932,7 +1932,7 @@ class TestDiskFile(unittest.TestCase):
                 mock.patch('os.listdir', _listdir),
                 mock.patch('os.unlink')):
             self.assertEqual(
-                list(self.df_mgr.yield_hashes('dev', '9')),
+                list(self.df_mgr.yield_hashes('dev', '9', 0)),
                 [(self.testdir +
                   '/dev/objects/9/abc/9373a92d072897b136b3fc06595b4abc',
                   '9373a92d072897b136b3fc06595b4abc', fresh_ts),
@@ -1975,7 +1975,7 @@ class TestDiskFile(unittest.TestCase):
                 mock.patch('os.unlink')):
             self.assertEqual(
                 list(self.df_mgr.yield_hashes(
-                    'dev', '9', suffixes=['456'])),
+                    'dev', '9', 0, suffixes=['456'])),
                 [(self.testdir +
                   '/dev/objects/9/456/9373a92d072897b136b3fc06595b0456',
                   '9373a92d072897b136b3fc06595b0456', '1383180000.12345'),

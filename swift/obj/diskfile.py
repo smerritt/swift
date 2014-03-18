@@ -571,7 +571,8 @@ class DiskFileManager(object):
             self, audit_location.path, dev_path,
             audit_location.partition)
 
-    def get_diskfile_from_hash(self, device, partition, object_hash, **kwargs):
+    def get_diskfile_from_hash(self, device, partition, object_hash,
+                               policy_idx, **kwargs):
         """
         Returns a DiskFile instance for an object at the given
         object_hash. Just in case someone thinks of refactoring, be
@@ -585,7 +586,8 @@ class DiskFileManager(object):
         if not dev_path:
             raise DiskFileDeviceUnavailable()
         object_path = os.path.join(
-            dev_path, DATADIR_BASE, partition, object_hash[-3:], object_hash)
+            dev_path, get_data_dir(policy_idx), partition, object_hash[-3:],
+            object_hash)
         try:
             filenames = hash_cleanup_listdir(object_path, self.reclaim_age)
         except OSError as err:
@@ -610,7 +612,8 @@ class DiskFileManager(object):
         except ValueError:
             raise DiskFileNotExist()
         return DiskFile(self, dev_path, self.threadpools[device],
-                        partition, account, container, obj, **kwargs)
+                        partition, account, container, obj,
+                        policy_idx=policy_idx, **kwargs)
 
     def get_hashes(self, device, partition, suffix, policy_idx):
         dev_path = self.get_dev_path(device)
@@ -635,7 +638,7 @@ class DiskFileManager(object):
                     path, err)
         return []
 
-    def yield_suffixes(self, device, partition):
+    def yield_suffixes(self, device, partition, policy_idx):
         """
         Yields tuples of (full_path, suffix_only) for suffixes stored
         on the given device and partition.
@@ -643,7 +646,8 @@ class DiskFileManager(object):
         dev_path = self.get_dev_path(device)
         if not dev_path:
             raise DiskFileDeviceUnavailable()
-        partition_path = os.path.join(dev_path, DATADIR_BASE, partition)
+        partition_path = os.path.join(dev_path, get_data_dir(policy_idx),
+                                      partition)
         for suffix in self._listdir(partition_path):
             if len(suffix) != 3:
                 continue
@@ -653,7 +657,7 @@ class DiskFileManager(object):
                 continue
             yield (os.path.join(partition_path, suffix), suffix)
 
-    def yield_hashes(self, device, partition, suffixes=None):
+    def yield_hashes(self, device, partition, policy_idx, suffixes=None):
         """
         Yields tuples of (full_path, hash_only, timestamp) for object
         information stored for the given device, partition, and
@@ -666,9 +670,10 @@ class DiskFileManager(object):
         if not dev_path:
             raise DiskFileDeviceUnavailable()
         if suffixes is None:
-            suffixes = self.yield_suffixes(device, partition)
+            suffixes = self.yield_suffixes(device, partition, policy_idx)
         else:
-            partition_path = os.path.join(dev_path, DATADIR_BASE, partition)
+            partition_path = os.path.join(dev_path, get_data_dir(policy_idx),
+                                          partition)
             suffixes = (
                 (os.path.join(partition_path, suffix), suffix)
                 for suffix in suffixes)
