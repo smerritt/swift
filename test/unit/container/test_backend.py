@@ -1387,6 +1387,16 @@ class TestContainerBroker(unittest.TestCase):
         broker.delete_object('nonesuch', normalize_timestamp(time()), 0)
         self.assertEqual(0, broker.get_info()['misplaced_object_count'])
 
+    def test_storage_policy_index_in_replication_info(self):
+        broker = ContainerBroker(':memory:', account='a', container='c')
+        broker.initialize(normalize_timestamp('1'), 0)
+        self.assertEqual(
+            0, broker.get_replication_info().get('storage_policy_index'))
+
+        broker.set_storage_policy_index(4931)
+        self.assertEqual(
+            4931, broker.get_replication_info().get('storage_policy_index'))
+
 
 def prespi_create_object_table(self, conn):
     """
