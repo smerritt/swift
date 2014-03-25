@@ -22,6 +22,7 @@ from swift.common.constraints import check_metadata, MAX_CONTAINER_NAME_LENGTH
 from swift.common.http import HTTP_ACCEPTED
 from swift.proxy.controllers.base import Controller, delay_denial, \
     cors_validation, clear_info_cache
+from swift.common.storage_policy import POLICIES, POLICY, POLICY_INDEX
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
     HTTPNotFound
 
@@ -33,7 +34,7 @@ class ContainerController(Controller):
     # Ensure these are all lowercase
     pass_through_headers = ['x-container-read', 'x-container-write',
                             'x-container-sync-key', 'x-container-sync-to',
-                            'x-versions-location']
+                            'x-versions-location', POLICY_INDEX.lower()]
 
     def __init__(self, app, account_name, container_name, **kwargs):
         Controller.__init__(self, app)
@@ -45,6 +46,24 @@ class ContainerController(Controller):
         return ['x-remove-%s-read' % st,
                 'x-remove-%s-write' % st,
                 'x-remove-versions-location']
+
+    def _convert_policy_to_index(self, req):
+        """
+        Helper method to convert a policy name (from a request from a client)
+        to a policy index (for a request to a backend).
+
+        :param req: incoming request
+        """
+        policy_name = req.headers.get(POLICY)
+        if policy_name:
+            policy = POLICIES.get_by_name(policy_name)
+            if policy:
+                return policy.idx
+            else:
+                raise HTTPBadRequest(request=req,
+                                     content_type="text/plain",
+                                     body=("Invalid X-Storage-Policy '%s'"
+                                           % policy_name))
 
     def clean_acls(self, req):
         if 'swift.clean_acl' in req.environ:
@@ -100,6 +119,7 @@ class ContainerController(Controller):
             self.clean_acls(req) or check_metadata(req, 'container')
         if error_response:
             return error_response
+        policy_index = self._convert_policy_to_index(req)
         if not req.environ.get('swift_owner'):
             for key in self.app.swift_owner_headers:
                 req.headers.pop(key, None)
@@ -126,7 +146,8 @@ class ContainerController(Controller):
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
         headers = self._backend_requests(req, len(containers),
-                                         account_partition, accounts)
+                                         account_partition, accounts,
+                                         policy_index)
         clear_info_cache(self.app, req.environ,
                          self.account_name, self.container_name)
         resp = self.make_requests(
@@ -142,6 +163,10 @@ class ContainerController(Controller):
             self.clean_acls(req) or check_metadata(req, 'container')
         if error_response:
             return error_response
+        policy_index = self._convert_policy_to_index(req)
+        additional_headers = {}
+        if policy_index is not None:
+            additional_headers[POLICY_INDEX] = str(policy_index)
         if not req.environ.get('swift_owner'):
             for key in self.app.swift_owner_headers:
                 req.headers.pop(key, None)
@@ -151,7 +176,9 @@ class ContainerController(Controller):
             return HTTPNotFound(request=req)
         container_partition, containers = self.app.container_ring.get_nodes(
             self.account_name, self.container_name)
-        headers = self.generate_request_headers(req, transfer=True)
+        headers = self.generate_request_headers(
+            req, transfer=True,
+            additional=additional_headers)
         clear_info_cache(self.app, req.environ,
                          self.account_name, self.container_name)
         resp = self.make_requests(
@@ -181,9 +208,11 @@ class ContainerController(Controller):
             return HTTPNotFound(request=req)
         return resp
 
-    def _backend_requests(self, req, n_outgoing,
-                          account_partition, accounts):
+    def _backend_requests(self, req, n_outgoing, account_partition, accounts,
+                          policy_index=None):
         additional = {'X-Timestamp': normalize_timestamp(time.time())}
+        if policy_index is not None:
+            additional[POLICY_INDEX] = str(policy_index)
         headers = [self.generate_request_headers(req, transfer=True,
                                                  additional=additional)
                    for _junk in range(n_outgoing)]

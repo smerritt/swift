@@ -22,6 +22,7 @@ import errno
 import sys
 from contextlib import contextmanager
 from collections import defaultdict, Iterable
+from numbers import Number
 from tempfile import NamedTemporaryFile
 import time
 from eventlet.green import socket
@@ -33,7 +34,6 @@ from hashlib import md5
 from eventlet import sleep, Timeout
 import logging.handlers
 from httplib import HTTPException
-from numbers import Number
 from swift.common import storage_policy
 import functools
 

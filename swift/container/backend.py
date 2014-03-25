@@ -35,7 +35,14 @@ class ContainerBroker(DatabaseBroker):
     db_contains_type = 'object'
     db_reclaim_timestamp = 'created_at'
 
-    def _initialize(self, conn, put_timestamp):
+    @property
+    def storage_policy_index(self):
+        if not hasattr(self, '_storage_policy_index'):
+            self._storage_policy_index = \
+                self.get_info()['storage_policy_index']
+        return self._storage_policy_index
+
+    def _initialize(self, conn, put_timestamp, storage_policy_index):
         """
         Create a brand new container database (tables, indices, triggers, etc.)
         """
@@ -46,11 +53,12 @@ class ContainerBroker(DatabaseBroker):
             raise ValueError(
                 'Attempting to create a new database with no container set')
         self.create_object_table(conn)
-        self.create_container_stat_table(conn, put_timestamp)
+        self.create_container_stat_table(conn, put_timestamp,
+                                         storage_policy_index)
 
     def create_object_table(self, conn):
         """
-        Create the object table which is specifc to the container DB.
+        Create the object table which is specific to the container DB.
         Not a part of Pluggable Back-ends, internal to the baseline code.
 
         :param conn: DB connection object
@@ -90,13 +98,15 @@ class ContainerBroker(DatabaseBroker):
             END;
         """)
 
-    def create_container_stat_table(self, conn, put_timestamp=None):
+    def create_container_stat_table(self, conn, put_timestamp,
+                                    storage_policy_index):
         """
         Create the container_stat table which is specific to the container DB.
         Not a part of Pluggable Back-ends, internal to the baseline code.
 
         :param conn: DB connection object
         :param put_timestamp: put timestamp
+        :param storage_policy_index: storage policy index
         """
         if put_timestamp is None:
             put_timestamp = normalize_timestamp(0)
@@ -119,7 +129,8 @@ class ContainerBroker(DatabaseBroker):
                 status_changed_at TEXT DEFAULT '0',
                 metadata TEXT DEFAULT '',
                 x_container_sync_point1 INTEGER DEFAULT -1,
-                x_container_sync_point2 INTEGER DEFAULT -1
+                x_container_sync_point2 INTEGER DEFAULT -1,
+                storage_policy_index INTEGER
             );
 
             INSERT INTO container_stat (object_count, bytes_used)
@@ -128,9 +139,9 @@ class ContainerBroker(DatabaseBroker):
         conn.execute('''
             UPDATE container_stat
             SET account = ?, container = ?, created_at = ?, id = ?,
-                put_timestamp = ?
+                put_timestamp = ?, storage_policy_index = ?
         ''', (self.account, self.container, normalize_timestamp(time.time()),
-              str(uuid4()), put_timestamp))
+              str(uuid4()), put_timestamp, storage_policy_index))
 
     def get_db_version(self, conn):
         if self._db_version == -1:
@@ -263,12 +274,14 @@ class ContainerBroker(DatabaseBroker):
                   put_timestamp, delete_timestamp, object_count, bytes_used,
                   reported_put_timestamp, reported_delete_timestamp,
                   reported_object_count, reported_bytes_used, hash, id,
-                  x_container_sync_point1, and x_container_sync_point2.
+                  x_container_sync_point1, x_container_sync_point2, and
+                  storage_policy_index.
         """
         self._commit_puts_stale_ok()
         with self.get() as conn:
             data = None
-            trailing = 'x_container_sync_point1, x_container_sync_point2'
+            trailing_sync = 'x_container_sync_point1, x_container_sync_point2'
+            trailing_pol = 'storage_policy_index'
             while not data:
                 try:
                     data = conn.execute('''
@@ -276,16 +289,20 @@ class ContainerBroker(DatabaseBroker):
                             delete_timestamp, object_count, bytes_used,
                             reported_put_timestamp, reported_delete_timestamp,
                             reported_object_count, reported_bytes_used, hash,
-                            id, %s
+                            id, %s, %s
                         FROM container_stat
-                    ''' % (trailing,)).fetchone()
+                    ''' % (trailing_sync, trailing_pol)).fetchone()
                 except sqlite3.OperationalError as err:
                     if 'no such column: x_container_sync_point' in str(err):
-                        trailing = '-1 AS x_container_sync_point1, ' \
-                                   '-1 AS x_container_sync_point2'
+                        trailing_sync = '-1 AS x_container_sync_point1, ' \
+                                        '-1 AS x_container_sync_point2'
+                    elif 'no such column: storage_policy_index' in str(err):
+                        trailing_pol = '0 AS storage_policy_index'
                     else:
                         raise
             data = dict(data)
+            # populate instance cache
+            self._storage_policy_index = data['storage_policy_index']
             return data
 
     def set_x_container_sync_points(self, sync_point1, sync_point2):
@@ -334,6 +351,25 @@ class ContainerBroker(DatabaseBroker):
                 UPDATE container_stat
                 SET x_container_sync_point2 = ?
             ''', (sync_point2,))
+
+    def set_storage_policy_index(self, policy_index):
+        def _setit(conn):
+            conn.execute("""
+                UPDATE container_stat
+                SET storage_policy_index = ?
+            """, (policy_index,))
+            conn.commit()
+
+        with self.get() as conn:
+            try:
+                _setit(conn)
+            except sqlite3.OperationalError as err:
+                if "no such column: storage_policy_index" not in str(err):
+                    raise
+                self._migrate_add_storage_policy_index(conn)
+                _setit(conn)
+
+        self._storage_policy_index = policy_index
 
     def reported(self, put_timestamp, delete_timestamp, object_count,
                  bytes_used):
@@ -498,3 +534,14 @@ class ContainerBroker(DatabaseBroker):
                         WHERE remote_id=?
                     ''', (max_rowid, source))
             conn.commit()
+
+    def _migrate_add_storage_policy_index(self, conn):
+        """
+        Add the storage_policy_index column to the 'container_stat' table.
+        """
+        conn.executescript('''
+            ALTER TABLE container_stat
+            ADD COLUMN storage_policy_index INTEGER;
+
+            UPDATE container_stat SET storage_policy_index=0;
+        ''')
