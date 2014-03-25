@@ -31,6 +31,7 @@ from swift.common.utils import cache_from_env, get_logger, \
     affinity_key_function, affinity_locality_predicate, list_from_csv, \
     register_swift_info
 from swift.common.constraints import check_utf8
+from swift.common.storage_policy import POLICIES
 from swift.proxy.controllers import AccountController, ObjectController, \
     ContainerController, InfoController
 from swift.common.swob import HTTPBadRequest, HTTPForbidden, \
@@ -213,6 +214,7 @@ class Application(object):
             max_account_name_length=constraints.MAX_ACCOUNT_NAME_LENGTH,
             max_container_name_length=constraints.MAX_CONTAINER_NAME_LENGTH,
             max_object_name_length=constraints.MAX_OBJECT_NAME_LENGTH,
+            policies=POLICIES.get_policy_info(),
             strict_cors_mode=self.strict_cors_mode)
 
     def check_config(self):
