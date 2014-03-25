@@ -154,6 +154,9 @@ def headers_to_container_info(headers, status_int=HTTP_OK):
     Construct a cacheable dict of container info based on response headers.
     """
     headers, meta, sysmeta = _prep_headers_to_info(headers, 'container')
+    # assure we have a policy 0 set when the policy header doesn't exist
+    if headers.get(POLICY_INDEX.lower()) is None:
+        headers[POLICY_INDEX.lower()] = '0'
     return {
         'status': status_int,
         'read_acl': headers.get('x-container-read'),
@@ -162,6 +165,7 @@ def headers_to_container_info(headers, status_int=HTTP_OK):
         'object_count': headers.get('x-container-object-count'),
         'bytes': headers.get('x-container-bytes-used'),
         'versions': headers.get('x-versions-location'),
+        'storage_policy': headers.get(POLICY_INDEX.lower()),
         'cors': {
             'allow_origin': meta.get('access-control-allow-origin'),
             'expose_headers': meta.get('access-control-expose-headers'),

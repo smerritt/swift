@@ -33,7 +33,7 @@ from contextlib import closing, nested
 from gzip import GzipFile
 
 from eventlet import tpool
-from test.unit import FakeLogger, mock as unit_mock, temptree
+from test.unit import FakeLogger, mock as unit_mock, temptree, patch_policies
 
 from swift.obj import diskfile
 from swift.common import utils
@@ -43,6 +43,11 @@ from swift.common.exceptions import DiskFileNotExist, DiskFileQuarantined, \
     DiskFileDeviceUnavailable, DiskFileDeleted, DiskFileNotOpen, \
     DiskFileError, ReplicationLockTimeout, PathNotDir, DiskFileCollision, \
     DiskFileExpired, SwiftException, DiskFileNoSpace
+from swift.common.storage_policy import StoragePolicy
+
+
+_mocked_policies = [StoragePolicy(0, 'zero', False),
+                    StoragePolicy(1, 'one', True)]
 
 
 def _create_test_ring(path):
@@ -129,6 +134,25 @@ class TestDiskFileModuleMethods(unittest.TestCase):
         with mock.patch("os.listdir", mocked_os_listdir):
             self.assertRaises(OSError, diskfile.hash_suffix,
                               os.path.join(self.testdir, "doesnotexist"), 101)
+
+    @patch_policies(_mocked_policies)
+    def test_get_data_dir(self):
+        self.assertEquals(diskfile.get_data_dir(0), diskfile.DATADIR_BASE)
+        self.assertEquals(diskfile.get_data_dir(1),
+                          diskfile.DATADIR_BASE + "-1")
+        self.assertRaises(ValueError, diskfile.get_data_dir, 'junk')
+
+        self.assertRaises(ValueError, diskfile.get_data_dir, 99)
+
+    @patch_policies(_mocked_policies)
+    def test_get_async_dir(self):
+        self.assertEquals(diskfile.get_async_dir(0),
+                          diskfile.ASYNCDIR_BASE)
+        self.assertEquals(diskfile.get_async_dir(1),
+                          diskfile.ASYNCDIR_BASE + "-1")
+        self.assertRaises(ValueError, diskfile.get_async_dir, 'junk')
+
+        self.assertRaises(ValueError, diskfile.get_async_dir, 99)
 
     def test_hash_suffix_hash_dir_is_file_quarantine(self):
         df = self._create_diskfile()
@@ -733,7 +757,7 @@ class TestDiskFileManager(unittest.TestCase):
             dp = self.df_mgr.construct_dev_path(self.existing_device1)
             ohash = diskfile.hash_path('a', 'c', 'o')
             wp.assert_called_with({'a': 1, 'b': 2},
-                                  os.path.join(dp, diskfile.ASYNCDIR,
+                                  os.path.join(dp, diskfile.ASYNCDIR_BASE,
                                                ohash[-3:], ohash + '-' + ts),
                                   os.path.join(dp, 'tmp'))
         self.df_mgr.logger.increment.assert_called_with('async_pendings')

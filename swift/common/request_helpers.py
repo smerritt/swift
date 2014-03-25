@@ -29,6 +29,7 @@ from swift.common.exceptions import ListingIterError, SegmentError
 from swift.common.http import is_success, HTTP_SERVICE_UNAVAILABLE
 from swift.common.swob import HTTPBadRequest, HTTPNotAcceptable
 from swift.common.utils import split_path, validate_device_partition
+from swift.common.storage_policy import POLICY_INDEX
 from swift.common.wsgi import make_subrequest
 
 
@@ -75,6 +76,19 @@ def get_listing_content_type(req):
     if not out_content_type:
         raise HTTPNotAcceptable(request=req)
     return out_content_type
+
+
+def get_name_and_placement(request, *args):
+    policy_idx = request.headers.get(POLICY_INDEX, '0')
+    try:
+        policy_idx = int(policy_idx)
+    except ValueError:
+        results = HTTPBadRequest(
+            "Policy index must be numeric (was %s)"
+            % policy_idx)
+    results = split_and_validate_path(request, *args)
+    results.append(policy_idx)
+    return results
 
 
 def split_and_validate_path(request, minsegs=1, maxsegs=None,

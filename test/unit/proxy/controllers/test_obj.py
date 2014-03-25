@@ -23,6 +23,9 @@ import swift
 from swift.proxy import server as proxy_server
 from swift.common.swob import HTTPException
 from test.unit import FakeRing, FakeMemcache, fake_http_connect
+from swift.common.storage_policy import StoragePolicy
+
+from test.unit import patch_policies
 
 
 @contextmanager
@@ -40,23 +43,24 @@ def set_http_connect(*args, **kwargs):
     swift.proxy.controllers.container.http_connect = old_connect
 
 
+@patch_policies([StoragePolicy(0, '', True, FakeRing(max_more_nodes=9))])
 class TestObjControllerWriteAffinity(unittest.TestCase):
     def setUp(self):
         self.app = proxy_server.Application(
             None, FakeMemcache(), account_ring=FakeRing(),
-            container_ring=FakeRing(), object_ring=FakeRing(max_more_nodes=9))
-        self.app.request_node_count = lambda replicas: 10000000
+            container_ring=FakeRing())
+        self.app.request_node_count = lambda ring: 10000000
         self.app.sort_nodes = lambda l: l  # stop shuffling the primary nodes
 
     def test_iter_nodes_local_first_noops_when_no_affinity(self):
         controller = proxy_server.ObjectController(self.app, 'a', 'c', 'o')
         self.app.write_affinity_is_local_fn = None
-
-        all_nodes = self.app.object_ring.get_part_nodes(1)
-        all_nodes.extend(self.app.object_ring.get_more_nodes(1))
+        object_ring = self.app.get_object_ring(None)
+        all_nodes = object_ring.get_part_nodes(1)
+        all_nodes.extend(object_ring.get_more_nodes(1))
 
         local_first_nodes = list(controller.iter_nodes_local_first(
-            self.app.object_ring, 1))
+            object_ring, 1))
 
         self.maxDiff = None
 
@@ -68,11 +72,12 @@ class TestObjControllerWriteAffinity(unittest.TestCase):
             lambda node: node['region'] == 1)
         self.app.write_affinity_node_count = lambda ring: 4
 
-        all_nodes = self.app.object_ring.get_part_nodes(1)
-        all_nodes.extend(self.app.object_ring.get_more_nodes(1))
+        object_ring = self.app.get_object_ring(None)
+        all_nodes = object_ring.get_part_nodes(1)
+        all_nodes.extend(object_ring.get_more_nodes(1))
 
         local_first_nodes = list(controller.iter_nodes_local_first(
-            self.app.object_ring, 1))
+            object_ring, 1))
 
         # the local nodes move up in the ordering
         self.assertEqual([1, 1, 1, 1],
@@ -98,11 +103,13 @@ class TestObjController(unittest.TestCase):
             app = mock.MagicMock()
             app.container_ring.get_nodes.return_value = (1, [2])
             app.object_ring.get_nodes.return_value = (1, [2])
+            app.get_object_ring.return_value = (FakeRing())
             controller = proxy_server.ObjectController(app, 'a', 'c', 'o')
             controller.container_info = mock.MagicMock(return_value={
                 'partition': 1,
                 'nodes': [{}],
                 'write_acl': None,
+                'storage_policy': None,
                 'sync_key': None,
                 'versions': None})
             # and now test that we add the header to log_info

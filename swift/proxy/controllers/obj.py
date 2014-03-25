@@ -54,6 +54,7 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPNotFound, \
     HTTPPreconditionFailed, HTTPRequestEntityTooLarge, HTTPRequestTimeout, \
     HTTPServerError, HTTPServiceUnavailable, Request, \
     HTTPClientDisconnect, HTTPNotImplemented
+from swift.common.storage_policy import POLICY_INDEX
 from swift.common.request_helpers import is_user_meta
 
 
@@ -193,15 +194,18 @@ class ObjectController(Controller):
         container_info = self.container_info(
             self.account_name, self.container_name, req)
         req.acl = container_info['read_acl']
+        policy_idx = container_info['storage_policy']
+        obj_ring = self.app.get_object_ring(policy_idx)
+        # pass the policy index to storage nodes via req header
+        req.headers[POLICY_INDEX] = policy_idx
         if 'swift.authorize' in req.environ:
             aresp = req.environ['swift.authorize'](req)
             if aresp:
                 return aresp
-
-        partition = self.app.object_ring.get_part(
+        partition = obj_ring.get_part(
             self.account_name, self.container_name, self.object_name)
         resp = self.GETorHEAD_base(
-            req, _('Object'), self.app.object_ring, partition,
+            req, _('Object'), obj_ring, partition,
             req.swift_entity_path)
 
         if ';' in resp.headers.get('content-type', ''):
@@ -298,7 +302,11 @@ class ObjectController(Controller):
                         self.app.expiring_objects_account, delete_at_container)
             else:
                 delete_at_container = delete_at_part = delete_at_nodes = None
-            partition, nodes = self.app.object_ring.get_nodes(
+            policy_idx = container_info['storage_policy']
+            obj_ring = self.app.get_object_ring(policy_idx)
+            # pass the policy index to storage nodes via req header
+            req.headers[POLICY_INDEX] = policy_idx
+            partition, nodes = obj_ring.get_nodes(
                 self.account_name, self.container_name, self.object_name)
             req.headers['X-Timestamp'] = normalize_timestamp(time.time())
 
@@ -306,7 +314,7 @@ class ObjectController(Controller):
                 req, len(nodes), container_partition, containers,
                 delete_at_container, delete_at_part, delete_at_nodes)
 
-            resp = self.make_requests(req, self.app.object_ring, partition,
+            resp = self.make_requests(req, obj_ring, partition,
                                       'POST', req.swift_entity_path, headers)
             return resp
 
@@ -440,6 +448,10 @@ class ObjectController(Controller):
         """HTTP PUT request handler."""
         container_info = self.container_info(
             self.account_name, self.container_name, req)
+        policy_idx = container_info['storage_policy']
+        obj_ring = self.app.get_object_ring(policy_idx)
+        # pass the policy index to storage nodes via req header
+        req.headers[POLICY_INDEX] = policy_idx
         container_partition = container_info['partition']
         containers = container_info['nodes']
         req.acl = container_info['write_acl']
@@ -470,7 +482,7 @@ class ObjectController(Controller):
                                       body='Non-integer X-Delete-After')
             req.headers['x-delete-at'] = normalize_delete_at_timestamp(
                 time.time() + x_delete_after)
-        partition, nodes = self.app.object_ring.get_nodes(
+        partition, nodes = obj_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
         # do a HEAD request for container sync and checking object versions
         if 'x-timestamp' in req.headers or \
@@ -479,7 +491,7 @@ class ObjectController(Controller):
             hreq = Request.blank(req.path_info, headers={'X-Newest': 'True'},
                                  environ={'REQUEST_METHOD': 'HEAD'})
             hresp = self.GETorHEAD_base(
-                hreq, _('Object'), self.app.object_ring, partition,
+                hreq, _('Object'), obj_ring, partition,
                 hreq.swift_entity_path)
         # Used by container sync feature
         if 'x-timestamp' in req.headers:
@@ -634,7 +646,7 @@ class ObjectController(Controller):
             delete_at_container = delete_at_part = delete_at_nodes = None
 
         node_iter = GreenthreadSafeIterator(
-            self.iter_nodes_local_first(self.app.object_ring, partition))
+            self.iter_nodes_local_first(obj_ring, partition))
         pile = GreenPile(len(nodes))
         te = req.headers.get('transfer-encoding', '')
         chunked = ('chunked' in te)
@@ -738,6 +750,10 @@ class ObjectController(Controller):
         """HTTP DELETE request handler."""
         container_info = self.container_info(
             self.account_name, self.container_name, req)
+        policy_idx = container_info['storage_policy']
+        obj_ring = self.app.get_object_ring(policy_idx)
+        # pass the policy index to storage nodes via req header
+        req.headers[POLICY_INDEX] = policy_idx
         container_partition = container_info['partition']
         containers = container_info['nodes']
         req.acl = container_info['write_acl']
@@ -791,6 +807,10 @@ class ObjectController(Controller):
                 new_del_req = Request.blank(copy_path, environ=req.environ)
                 container_info = self.container_info(
                     self.account_name, self.container_name, req)
+                policy_idx = container_info['storage_policy']
+                obj_ring = self.app.get_object_ring(policy_idx)
+                # pass the policy index to storage nodes via req header
+                req.headers[POLICY_INDEX] = policy_idx
                 container_partition = container_info['partition']
                 containers = container_info['nodes']
                 new_del_req.acl = container_info['write_acl']
@@ -805,7 +825,7 @@ class ObjectController(Controller):
                 return aresp
         if not containers:
             return HTTPNotFound(request=req)
-        partition, nodes = self.app.object_ring.get_nodes(
+        partition, nodes = obj_ring.get_nodes(
             self.account_name, self.container_name, self.object_name)
         # Used by container sync feature
         if 'x-timestamp' in req.headers:
@@ -822,7 +842,7 @@ class ObjectController(Controller):
 
         headers = self._backend_requests(
             req, len(nodes), container_partition, containers)
-        resp = self.make_requests(req, self.app.object_ring,
+        resp = self.make_requests(req, obj_ring,
                                   partition, 'DELETE', req.swift_entity_path,
                                   headers)
         return resp
