@@ -210,6 +210,19 @@ def connect_tcp(hostport):
     return rv
 
 
+def with_tempdir(f):
+    @functools.wraps(f)
+    def wrapped(*args, **kwargs):
+        tempdir = mkdtemp()
+        args = list(args)
+        args.append(tempdir)
+        try:
+            return f(*args, **kwargs)
+        finally:
+            rmtree(tempdir)
+    return wrapped
+
+
 @contextmanager
 def tmpfile(content):
     with NamedTemporaryFile('w', delete=False) as f:

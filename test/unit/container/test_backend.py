@@ -24,6 +24,8 @@ from tempfile import mkdtemp
 from time import sleep, time
 from uuid import uuid4
 import itertools
+import sqlite3
+import random
 
 from swift.container.backend import ContainerBroker
 from swift.common.utils import normalize_timestamp
@@ -31,7 +33,7 @@ from swift.common.storage_policy import POLICIES
 
 import mock
 
-from test.unit import patch_policies
+from test.unit import patch_policies, with_tempdir
 
 
 class TestContainerBroker(unittest.TestCase):
@@ -1675,6 +1677,20 @@ class TestContainerBrokerBeforeSPI(TestContainerBroker):
             except BaseException as err:
                 exc = err
         self.assert_('no such column: storage_policy_index' in str(exc))
+        with broker.get() as conn:
+            try:
+                conn.execute('''SELECT storage_policy_index
+                                FROM object''')
+            except sqlite3.OperationalError as err:
+                self.assert_(
+                    'no such column: storage_policy_index' in str(err))
+            except Exception as err:
+                self.fail('broker raised unexpected error %r (%s) trying '
+                          'to SELECT storage_policy_index FROM object' % (
+                              err, err))
+            else:
+                self.fail('pre-spi broker was created with '
+                          'storage_policy_index column in object table')
 
     def tearDown(self):
         ContainerBroker.create_container_stat_table = \
@@ -1685,3 +1701,97 @@ class TestContainerBrokerBeforeSPI(TestContainerBroker):
         broker.initialize(normalize_timestamp('1'), 0)
         with broker.get() as conn:
             conn.execute('SELECT storage_policy_index FROM container_stat')
+        with broker.get() as conn:
+            try:
+                conn.execute('''SELECT storage_policy_index
+                                FROM object''')
+            except Exception as err:
+                self.fail('broker raised unexpected error %r (%s) trying '
+                          'to SELECT storage_policy_index FROM object' % (
+                              err, err))
+
+    @with_tempdir
+    @patch_policies
+    def test_object_table_migration(self, tempdir):
+        db_path = os.path.join(tempdir, 'container.db')
+
+        # create a db that doesn't have a policy_index
+        broker = ContainerBroker(db_path, account='a', container='c')
+        broker.initialize(normalize_timestamp(0), None)
+        # add a pre-spi row
+        with broker.get() as conn:
+            conn.execute('''
+                insert into object (name, created_at, size,
+                    content_type, etag, deleted)
+                values (?, ?, ?, ?, ?, ?)
+            ''', ('test-object', 0, 0, 'application/x-test', 'x', 0))
+            conn.commit()
+
+        # make sure we can still get some info
+        self.assertEqual(0, broker.get_info()['storage_policy_index'])
+        self.assertEqual(0,
+                         broker.get_replication_info()['storage_policy_index'])
+        objects = list(broker.list_objects_iter(10, None, None, None, None))
+        self.assertEqual(1, len(objects))
+        obj = objects[0]
+        self.assertEqual(obj[0], 'test-object')
+        self.assertEqual(obj[1], '0')
+        self.assertEqual(obj[2], 0)
+        self.assertEqual(obj[3], 'application/x-test')
+        self.assertEqual(obj[4], 'x')
+        self.assertEqual(obj[5], 0)
+
+        # verify we're not migrated yet
+        with broker.get() as conn:
+            try:
+                conn.execute('''SELECT storage_policy_index
+                                FROM object''')
+            except sqlite3.OperationalError as err:
+                self.assert_(
+                    'no such column: storage_policy_index' in str(err))
+            except Exception as err:
+                self.fail('broker raised unexpected error %r (%s) trying '
+                          'to SELECT storage_policy_index FROM object' % (
+                              err, err))
+            else:
+                self.fail('pre-spi broker was created with '
+                          'storage_policy_index column in object table')
+
+        other_policy = random.choice([p for p in POLICIES if p.idx != 0])
+        broker.put_object('test-other-policy-object', 0, 0,
+                          'application/x-test', 'x', other_policy.idx)
+        broker._commit_puts()
+
+        # we have two objects now...
+        objects = list(broker.list_objects_iter(10, None, None, None, None))
+        self.assertEqual(2, len(objects))
+
+        # and now we are migrated
+        with broker.get() as conn:
+            try:
+                conn.execute('''SELECT storage_policy_index
+                                FROM object''')
+            except Exception as err:
+                self.fail('broker raised unexpected error %r (%s) trying '
+                          'to SELECT storage_policy_index FROM object' % (
+                              err, err))
+
+        # ... but nothing in object_cleanup
+        self.assertEqual([], broker.list_cleanups(1))
+
+        # over-write our "wrong" policy object with the legacy policy
+        broker.put_object('test-other-policy-object', 1, 0,
+                          'application/x-test', 'x', 0)
+        broker._commit_puts()
+
+        # ... still only two objects
+        objects = list(broker.list_objects_iter(10, None, None, None, None))
+        self.assertEqual(2, len(objects))
+
+        # ... but now we have an object_cleanup
+        objects = broker.list_cleanups(1000)
+        self.assertEqual(1, len(objects))
+        obj = objects[0]
+        self.assertEqual(obj['name'], 'test-other-policy-object')
+        self.assertEqual(obj['created_at'], '0')
+        self.assertEqual(obj['storage_policy_index'], other_policy.idx)

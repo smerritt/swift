@@ -560,7 +560,14 @@ class ContainerBroker(DatabaseBroker):
                     query += ' deleted = 0'
                 query += ' ORDER BY name LIMIT ?'
                 query_args.append(limit - len(results))
-                curs = conn.execute(query, query_args)
+                try:
+                    curs = conn.execute(query, query_args)
+                except sqlite3.OperationalError as err:
+                    if 'no such column: storage_policy_index' not in str(err):
+                        raise
+                    query = query.replace('storage_policy_index',
+                                          '0 as storage_policy_index')
+                    curs = conn.execute(query, query_args)
                 curs.row_factory = None
 
                 if prefix is None:
@@ -767,7 +774,6 @@ class ContainerBroker(DatabaseBroker):
             conn.execute(query, (name, created_at, storage_policy_index))
         except sqlite3.OperationalError as err:
             if "no such table: object_cleanup" not in str(err):
-                print str(err)
                 raise
             self.create_object_cleanup_table(conn)
             conn.execute(query, (name, created_at, storage_policy_index))
@@ -779,22 +785,15 @@ class ContainerBroker(DatabaseBroker):
         """
         conn.executescript('''
             ALTER TABLE object
-            ADD COLUMN storage_policy_index INTEGER;
-
-            UPDATE object SET storage_policy_index=0;
+            ADD COLUMN storage_policy_index INTEGER DEFAULT 0;
 
             ALTER TABLE container_stat
-            ADD COLUMN storage_policy_index INTEGER;
+            ADD COLUMN storage_policy_index INTEGER DEFAULT 0;
 
             ALTER TABLE container_stat
-            ADD COLUMN misplaced_object_count INTEGER;
+            ADD COLUMN misplaced_object_count INTEGER DEFAULT 0;
 
             ALTER TABLE container_stat
-            ADD COLUMN object_cleanup_count INTEGER;
+            ADD COLUMN object_cleanup_count INTEGER DEFAULT 0;
 
-            UPDATE container_stat SET storage_policy_index=0,
-                                      misplaced_object_count=0,
-                                      object_cleanup_count=0;
-
-            %s
-        ''' % SPI_TRIGGER_SCRIPT)
+        ''' + SPI_TRIGGER_SCRIPT)
