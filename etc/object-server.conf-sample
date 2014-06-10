@@ -127,6 +127,9 @@ use = egg:swift#object
 # an abort to occur.
 # replication_failure_threshold = 100
 # replication_failure_ratio = 1.0
+#
+# Use splice() for zero-copy object GETs. Requires splicetee to be installed.
+# splice = no
 
 [filter:healthcheck]
 use = egg:swift#healthcheck
