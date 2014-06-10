@@ -810,6 +810,22 @@ class TestDiskFileManager(unittest.TestCase):
                 lock_exc = err
             self.assertTrue(lock_exc is None)
 
+    def test_missing_splice_warning(self):
+        logger = FakeLogger()
+        _old_splicetee = diskfile.splicetee
+
+        try:
+            diskfile.splicetee = None
+            self.conf['splice'] = 'yes'
+            mgr = diskfile.DiskFileManager(self.conf, logger)
+
+            warnings = logger.get_lines_for_level('warning')
+            self.assertTrue(len(warnings) > 0)
+            self.assertTrue('splice()' in warnings[-1])
+            self.assertFalse(mgr.use_splice)
+        finally:
+            diskfile.splicetee = _old_splicetee
+
 
 class TestDiskFile(unittest.TestCase):
     """Test swift.obj.diskfile.DiskFile"""
