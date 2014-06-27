@@ -48,7 +48,6 @@ from collections import defaultdict
 
 from xattr import getxattr, setxattr
 from eventlet import Timeout
-from eventlet.hubs import trampoline
 
 from swift import gettext_ as _
 from swift.common.constraints import check_mount
@@ -56,7 +55,7 @@ from swift.common.utils import mkdirs, Timestamp, \
     storage_directory, hash_path, renamer, fallocate, fsync, \
     fdatasync, drop_buffer_cache, ThreadPool, lock_path, write_pickle, \
     config_true_value, listdir, split_path, ismount, remove_file, \
-    get_md5_socket, system_has_splice, splice, tee, SPLICE_F_MORE
+    get_md5_socket, system_can_zero_copy_splice, SpliceFd, SplicePipe
 from swift.common.exceptions import DiskFileQuarantined, DiskFileNotExist, \
     DiskFileCollision, DiskFileNoSpace, DiskFileDeviceUnavailable, \
     DiskFileDeleted, DiskFileError, DiskFileNotOpen, PathNotDir, \
@@ -86,6 +85,7 @@ MD5_OF_EMPTY_STRING = 'd41d8cd98f00b204e9800998ecf8427e'
 # about them. We ask anyway just in case that ever gets fixed.
 AF_ALG = getattr(socket, 'AF_ALG', 38)
 F_SETPIPE_SZ = getattr(fcntl, 'F_SETPIPE_SZ', 1031)
+F_GETPIPE_SZ = getattr(fcntl, 'F_GETPIPE_SZ', 1032)
 
 
 def read_metadata(fd):
@@ -387,6 +387,31 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
         return hashed, hashes
 
 
+class DiskFileSpliceFd(SpliceFd):
+    """
+    SpliceFd that calls splice() in a threadpool and also tracks how much
+    time is spent in splice().
+    """
+    def __init__(self, *args, **kwargs):
+        self.time_spent_in_splice = 0.0
+        self._threadpool = kwargs.pop('threadpool')
+        super(DiskFileSpliceFd, self).__init__(*args, **kwargs)
+
+    def call_splice(self, in_fd, off_in, out_fd, off_out, count, flags):
+        """
+        Call splice in a threadpool and keep track of how long it takes (not
+        counting threadpool overhead).
+        """
+        def do_splice():
+            start = time.time()
+            retval = super(DiskFileSpliceFd, self).call_splice(
+                in_fd, off_in, out_fd, off_out, count, flags)
+            self.time_spent_in_splice += (time.time() - start)
+            return retval
+
+        return self._threadpool.run_in_thread(do_splice)
+
+
 class AuditLocation(object):
     """
     Represents an object location to be audited.
@@ -512,7 +537,7 @@ class DiskFileManager(object):
         self.use_splice = False
         self.pipe_size = None
 
-        splice_available = system_has_splice()
+        splice_available = system_can_zero_copy_splice()
 
         conf_wants_splice = config_true_value(conf.get('splice', 'no'))
         # If the operator wants zero-copy with splice() but we don't have the
@@ -540,7 +565,15 @@ class DiskFileManager(object):
                 self.use_splice = True
                 with open('/proc/sys/fs/pipe-max-size') as f:
                     max_pipe_size = int(f.read())
-                self.pipe_size = min(max_pipe_size, self.disk_chunk_size)
+                if self.disk_chunk_size > max_pipe_size:
+                    logger.warn(
+                        "disk_chunk_size bigger than "
+                        "/proc/sys/fs/pipe-max-size (%d > %d); using "
+                        "disk_chunk_size=%d for zero-copy operations",
+                        self.disk_chunk_size, max_pipe_size, max_pipe_size)
+                    self.pipe_size = max_pipe_size
+                else:
+                    self.pipe_size = self.disk_chunk_size
 
     def construct_dev_path(self, device):
         """
@@ -764,8 +797,11 @@ class DiskFileWriter(object):
     :param tmppath: full path name of the opened file descriptor
     :param bytes_per_sync: number bytes written between sync calls
     :param threadpool: internal thread pool to use for disk operations
+    :param pipe_size: pipe buffer size for zero-copy operations
+    :param use_splice: whether to allow zero-copy operations
     """
-    def __init__(self, name, datadir, fd, tmppath, bytes_per_sync, threadpool):
+    def __init__(self, name, datadir, fd, tmppath, bytes_per_sync, threadpool,
+                 pipe_size, use_splice):
         # Parameter tracking
         self._name = name
         self._datadir = datadir
@@ -773,6 +809,8 @@ class DiskFileWriter(object):
         self._tmppath = tmppath
         self._bytes_per_sync = bytes_per_sync
         self._threadpool = threadpool
+        self._pipe_size = pipe_size
+        self._use_splice = use_splice
 
         # Internal attributes
         self._upload_size = 0
@@ -807,6 +845,80 @@ class DiskFileWriter(object):
             self._last_sync = self._upload_size
 
         return self._upload_size
+
+    def can_zero_copy_receive(self):
+        return self._use_splice
+
+    def zero_copy_receive(self, source_splice_fd, read_chunk_size, nbytes,
+                          preamble, upload_expiration):
+        """
+        Copies the object to disk without touching userspace.
+
+        :param source_splice_fd: SpliceFd that will send the data
+        :param read_chunk_size: number of bytes to read at a time
+        :param nbytes: maximum number of bytes to read
+        :param preamble: bytes to write to disk first before splicing
+        :param upload_expiration: time after which this upload will be
+                                  considered failed; this is to prevent
+                                  uploads that take unreasonably long times.
+
+        :returns: 3-tuple (number of bytes written, md5 of data,
+                          time spent in disk IO), or (None, None, None)
+                          if upload expired
+        """
+        # pipes only get so big; if we try to jam more than that into one, we
+        # block or get IOError/EWOULDBLOCK.
+        read_chunk_size = min(self._pipe_size, read_chunk_size)
+        disk_splice_fd = DiskFileSpliceFd(fd=self._fd,
+                                          threadpool=self._threadpool)
+        md5_sockfd = get_md5_socket()
+        md5_splice_fd = SpliceFd(fd=md5_sockfd)
+        SplicePipe(source=source_splice_fd,
+                   sinks=[md5_splice_fd, disk_splice_fd])
+
+        total_read = 0
+        last_sync = 0
+        time_spent_in_flush = 0.0
+        try:
+            if preamble:
+                source_splice_fd.sideload_data(preamble)
+                nbytes -= len(preamble)
+                total_read += len(preamble)
+                last_sync += len(preamble)
+
+            while True:
+                if nbytes <= 0:
+                    break
+                if time.time() >= upload_expiration:
+                    return (None, None, None)
+
+                to_read = min(read_chunk_size, nbytes)
+                nread = source_splice_fd.pull_data(to_read)
+                if nread == 0:
+                    break
+                total_read += nread
+                nbytes -= nread
+
+                # For large files sync every 512MB (by default) written
+                diff = total_read - last_sync
+                if diff >= self._bytes_per_sync:
+                    start = time.time()
+                    self._threadpool.force_run_in_thread(fdatasync, self._fd)
+                    drop_buffer_cache(self._fd, last_sync, diff)
+                    time_spent_in_flush += (time.time() - start)
+
+                    last_sync = total_read
+            if total_read > 0:
+                bin_checksum = os.read(md5_sockfd, 16)
+                hex_checksum = ''.join("%02x" % ord(c) for c in bin_checksum)
+            else:
+                hex_checksum = MD5_OF_EMPTY_STRING
+
+            return (total_read, hex_checksum,
+                    disk_splice_fd.time_spent_in_splice + time_spent_in_flush)
+        finally:
+            os.close(md5_sockfd)
+            source_splice_fd.close()
 
     def _finalize_put(self, metadata, target_path):
         # Write the metadata before calling fsync() so that both data and
@@ -877,7 +989,8 @@ class DiskFileReader(object):
     :param logger: logger caller wants this object to use
     :param quarantine_hook: 1-arg callable called w/reason when quarantined
     :param use_splice: if true, use zero-copy splice() to send data
-    :param pipe_size: size of pipe buffer used in zero-copy operations
+    :param pipe_size: size of pipe buffer used in zero-copy operations; this
+                      is also the size of chunks read from disk.
     :param keep_cache: should resulting reads be kept in the buffer cache
     """
     def __init__(self, fp, data_file, obj_size, etag, threadpool,
@@ -945,98 +1058,52 @@ class DiskFileReader(object):
     def can_zero_copy_send(self):
         return self._use_splice
 
-    def zero_copy_send(self, wsockfd):
+    def zero_copy_send(self, sink):
         """
-        Does some magic with splice() and tee() to move stuff from disk to
-        network without ever touching userspace.
+        Copies the object from disk to network without ever touching userspace.
 
-        :param wsockfd: file descriptor (integer) of the socket out which to
-                        send data
+        :param sink: SpliceFd that will receive the data
         """
         # Note: if we ever add support for zero-copy ranged GET responses,
         # we'll have to make this conditional.
         self._started_at_0 = True
-
-        rfd = self._fp.fileno()
-        client_rpipe, client_wpipe = os.pipe()
-        hash_rpipe, hash_wpipe = os.pipe()
         md5_sockfd = get_md5_socket()
 
-        # The actual amount allocated to the pipe may be rounded up to the
-        # nearest multiple of the page size. If we have the memory allocated,
-        # we may as well use it.
-        #
-        # Note: this will raise IOError on failure, so we don't bother
-        # checking the return value.
-        pipe_size = fcntl.fcntl(client_rpipe, F_SETPIPE_SZ, self._pipe_size)
-        fcntl.fcntl(hash_rpipe, F_SETPIPE_SZ, pipe_size)
+        rfd = self._fp.fileno()
+        md5_splice_fd = SpliceFd(fd=md5_sockfd)
+        source_link = DiskFileSpliceFd(
+            fd=self._fp.fileno(), threadpool=self._threadpool,
+            read_chunk_size=self._pipe_size)
+        SplicePipe(
+            source=source_link,
+            sinks=[md5_splice_fd, sink])
 
         dropped_cache = 0
         self._bytes_read = 0
         try:
             while True:
-                # Read data from disk to pipe
-                bytes_in_pipe = self._threadpool.run_in_thread(
-                    splice, rfd, 0, client_wpipe, 0, pipe_size, 0)
-                if bytes_in_pipe == 0:
+                nread = source_link.splice_data_downstream()
+                if nread == 0:
                     self._read_to_eof = True
                     self._drop_cache(rfd, dropped_cache,
                                      self._bytes_read - dropped_cache)
                     break
-                self._bytes_read += bytes_in_pipe
-
-                # "Copy" data from pipe A to pipe B (really just some pointer
-                # manipulation in the kernel, not actual copying).
-                bytes_copied = tee(client_rpipe, hash_wpipe, bytes_in_pipe, 0)
-                if bytes_copied != bytes_in_pipe:
-                    # We teed data between two pipes of equal size, and the
-                    # destination pipe was empty. If, somehow, the destination
-                    # pipe was full before all the data was teed, we should
-                    # fail here. If we don't raise an exception, then we will
-                    # have the incorrect MD5 hash once the object has been
-                    # sent out, causing a false-positive quarantine.
-                    raise Exception("tee() failed: tried to move %d bytes, "
-                                    "but only moved %d" %
-                                    (bytes_in_pipe, bytes_copied))
-                # Take the data and feed it into an in-kernel MD5 socket. The
-                # MD5 socket hashes data that is written to it. Reading from
-                # it yields the MD5 checksum of the written data.
-                hashed = splice(hash_rpipe, 0, md5_sockfd, 0,
-                                bytes_in_pipe, SPLICE_F_MORE)
-                if hashed != bytes_in_pipe:
-                    # It's a data sink; it doesn't get full.
-                    raise Exception("md5 socket didn't take all the data? "
-                                    "(tried to write %d, but wrote %d)" %
-                                    (bytes_in_pipe, hashed))
-
-                while bytes_in_pipe > 0:
-                    sent = splice(client_rpipe, 0, wsockfd, 0,
-                                  bytes_in_pipe, 0)
-                    if sent is None:  # would have blocked
-                        trampoline(wsockfd, write=True)
-                    else:
-                        bytes_in_pipe -= sent
-
+                self._bytes_read += nread
                 if self._bytes_read - dropped_cache > DROP_CACHE_WINDOW:
                     self._drop_cache(rfd, dropped_cache,
                                      self._bytes_read - dropped_cache)
                     dropped_cache = self._bytes_read
         finally:
+            source_link.close()
             # Linux MD5 sockets return '00000000000000000000000000000000' for
             # the checksum if you didn't write any bytes to them, instead of
-            # returning the correct value.
+            # the correct value.
             if self._bytes_read > 0:
                 bin_checksum = os.read(md5_sockfd, 16)
                 hex_checksum = ''.join("%02x" % ord(c) for c in bin_checksum)
             else:
                 hex_checksum = MD5_OF_EMPTY_STRING
             self._md5_of_sent_bytes = hex_checksum
-
-            os.close(client_rpipe)
-            os.close(client_wpipe)
-            os.close(hash_rpipe)
-            os.close(hash_wpipe)
-            os.close(md5_sockfd)
             self.close()
 
     def app_iter_range(self, start, stop):
@@ -1564,7 +1631,9 @@ class DiskFile(object):
                 except OSError:
                     raise DiskFileNoSpace()
             yield DiskFileWriter(self._name, self._datadir, fd, tmppath,
-                                 self._bytes_per_sync, self._threadpool)
+                                 self._bytes_per_sync, self._threadpool,
+                                 pipe_size=self._pipe_size,
+                                 use_splice=self._use_splice)
         finally:
             try:
                 os.close(fd)

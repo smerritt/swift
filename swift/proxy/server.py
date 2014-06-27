@@ -202,7 +202,7 @@ class Application(object):
         # those between the proxy servers and the other internal servers.
         #
         # ** Because it affects the client as well, currently, we use the
-        # client chunk size as the govenor and not the object chunk size.
+        # client chunk size as the governor and not the object chunk size.
         socket._fileobject.default_bufsize = self.client_chunk_size
         self.expose_info = config_true_value(
             conf.get('expose_info', 'yes'))

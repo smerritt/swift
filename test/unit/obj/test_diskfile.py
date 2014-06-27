@@ -39,7 +39,7 @@ from test.unit import (FakeLogger, mock as unit_mock, temptree,
 from nose import SkipTest
 from swift.obj import diskfile
 from swift.common import utils
-from swift.common.utils import hash_path, mkdirs, Timestamp
+from swift.common.utils import hash_path, mkdirs, Timestamp, SpliceFd
 from swift.common import ring
 from swift.common.exceptions import DiskFileNotExist, DiskFileQuarantined, \
     DiskFileDeviceUnavailable, DiskFileDeleted, DiskFileNotOpen, \
@@ -954,7 +954,7 @@ class TestDiskFileManager(unittest.TestCase):
 
     def test_missing_splice_warning(self):
         logger = FakeLogger()
-        with mock.patch('swift.obj.diskfile.system_has_splice',
+        with mock.patch('swift.obj.diskfile.system_can_zero_copy_splice',
                         lambda: False):
             self.conf['splice'] = 'yes'
             mgr = diskfile.DiskFileManager(self.conf, logger)
@@ -2178,7 +2178,7 @@ class TestDiskFile(unittest.TestCase):
         self.assertTrue(exp_name in set(dl))
 
     def _system_can_zero_copy(self):
-        if not utils.system_has_splice():
+        if not utils.system_can_zero_copy_splice():
             return False
 
         try:
@@ -2197,14 +2197,15 @@ class TestDiskFile(unittest.TestCase):
         self.conf['disk_chunk_size'] = 4096
         self.df_mgr = diskfile.DiskFileManager(self.conf, FakeLogger())
 
-        df = self._get_open_disk_file(fsize=16385)
+        df = self._get_open_disk_file(fsize=16385, csize=4096)
         reader = df.reader()
         self.assertTrue(reader.can_zero_copy_send())
         with mock.patch("swift.obj.diskfile.drop_buffer_cache") as dbc:
             with mock.patch("swift.obj.diskfile.DROP_CACHE_WINDOW", 4095):
                 with open('/dev/null', 'w') as devnull:
-                    reader.zero_copy_send(devnull.fileno())
-                self.assertEqual(len(dbc.mock_calls), 5)
+                    devnull_tube = SpliceFd(fd=devnull.fileno())
+                    reader.zero_copy_send(devnull_tube)
+                    self.assertEqual(len(dbc.mock_calls), 5)
 
     def test_zero_copy_turns_off_when_md5_sockets_not_supported(self):
         if not self._system_can_zero_copy():
@@ -2220,6 +2221,24 @@ class TestDiskFile(unittest.TestCase):
 
             log_lines = self.df_mgr.logger.get_lines_for_level('warning')
             self.assert_('MD5 sockets' in log_lines[-1])
+
+    def test_warn_when_chunk_size_too_big(self):
+        if not utils.system_can_zero_copy_splice():
+            raise SkipTest("splice not available")
+
+        with open('/proc/sys/fs/pipe-max-size') as f:
+            max_pipe_size = int(f.read())
+
+        self.conf['disk_chunk_size'] = max_pipe_size + 1
+        self.conf['splice'] = 'on'
+        logger = FakeLogger()
+        diskfile.DiskFileManager(self.conf, logger)
+
+        self.assertEquals(
+            logger.get_lines_for_level('warning')[0],
+            ("disk_chunk_size bigger than /proc/sys/fs/pipe-max-size (%d > %d)"
+             "; using disk_chunk_size=%d for zero-copy operations"
+             % (max_pipe_size + 1, max_pipe_size, max_pipe_size)))
 
 
 if __name__ == '__main__':

@@ -21,6 +21,7 @@ import ctypes
 import errno
 import eventlet
 import eventlet.event
+import hashlib
 import grp
 import logging
 import os
@@ -34,6 +35,7 @@ import math
 
 from textwrap import dedent
 
+import nose
 import tempfile
 import threading
 import time
@@ -4037,6 +4039,113 @@ class TestLRUCache(unittest.TestCase):
         for i in range(12):
             f(i)
         self.assertEqual(f.size(), 4)
+
+
+class TestSplice(unittest.TestCase):
+    def setUp(self):
+        if not utils.system_can_zero_copy_splice():
+            raise nose.SkipTest("splice not available")
+        self.tempdir = mkdtemp()
+        self.src_file = os.path.join(self.tempdir, 'src')
+        self.dest_file = os.path.join(self.tempdir, 'dest')
+        # 256 KiB + 16 B: bigger than the default pipe buffer (64 KiB), and
+        # also not a multiple of the default pipe-buffer size
+        self.file_contents = '[...SQUIRREL...]' * (1024 * 16 + 1)
+
+        with open(self.src_file, 'w') as fh:
+            fh.write(self.file_contents)
+
+    def tearDown(self):
+        rmtree(self.tempdir, ignore_errors=True)
+
+    def test_basic_splicing(self):
+        with open(self.src_file, 'r') as src:
+            with open(self.dest_file, 'w') as dest:
+                src_splicefd = utils.SpliceFd(fd=src.fileno())
+                dest_splicefd = utils.SpliceFd(fd=dest.fileno())
+                utils.SplicePipe(source=src_splicefd,
+                                 sinks=[dest_splicefd])
+
+                while True:
+                    nread = src_splicefd.splice_data_downstream(64 * 1024)
+                    if nread == 0:
+                        break
+
+        with open(self.dest_file, 'r') as dest:
+            self.assertEqual(len(self.file_contents),
+                             os.fstat(dest.fileno()).st_size)
+            self.assertEqual(self.file_contents, dest.read())
+
+    def test_splice_flags(self):
+        # If you don't say SPLICE_F_MORE everywhere, MD5 sockets lose track of
+        # what they're doing.
+        expected_md5 = hashlib.md5(self.file_contents).hexdigest()
+        with open(self.src_file, 'r') as src:
+            # we have two so we test the splice-splice path as well as the
+            # splice-tee-splice path
+            md5_sock1fd = utils.get_md5_socket()
+            md5_sock2fd = utils.get_md5_socket()
+
+            src_splicefd = utils.SpliceFd(fd=src.fileno())
+            md5_splicefd1 = utils.SpliceFd(fd=md5_sock1fd)
+            md5_splicefd2 = utils.SpliceFd(fd=md5_sock2fd)
+
+            utils.SplicePipe(source=src_splicefd,
+                             sinks=[md5_splicefd1, md5_splicefd2])
+
+            while True:
+                nread = src_splicefd.splice_data_downstream(64 * 1024)
+                if nread == 0:
+                    break
+
+        md5_1 = ''.join("%02x" % ord(c) for c in os.read(md5_sock1fd, 16))
+        md5_2 = ''.join("%02x" % ord(c) for c in os.read(md5_sock2fd, 16))
+        self.assertEqual(expected_md5, md5_1)
+        self.assertEqual(expected_md5, md5_2)
+
+        os.close(md5_sock1fd)
+        os.close(md5_sock2fd)
+
+    def test_default_read_chunk_size(self):
+        with open(self.src_file, 'r') as src:
+            with open(self.dest_file, 'w') as dest:
+                src_splicefd = utils.SpliceFd(fd=src.fileno(),
+                                              read_chunk_size=32 * 1024)
+                dest_splicefd = utils.SpliceFd(fd=dest.fileno())
+                utils.SplicePipe(source=src_splicefd,
+                                 sinks=[dest_splicefd])
+
+                while True:
+                    nread = src_splicefd.splice_data_downstream()
+                    if nread == 0:
+                        break
+
+        with open(self.dest_file, 'r') as dest:
+            self.assertEqual(len(self.file_contents),
+                             os.fstat(dest.fileno()).st_size)
+            self.assertEqual(self.file_contents, dest.read())
+
+    def test_read_chunk_size_bigger_than_pipe(self):
+        with open(self.src_file, 'r') as src:
+            with open(self.dest_file, 'w') as dest:
+                src_splicefd = utils.SpliceFd(fd=src.fileno(),
+                                              read_chunk_size=256 * 1024)
+                dest_splicefd = utils.SpliceFd(fd=dest.fileno())
+                utils.SplicePipe(source=src_splicefd,
+                                 sinks=[dest_splicefd],
+                                 pipe_size=128 * 1024)
+                self.assertRaises(ValueError,
+                                  src_splicefd.splice_data_downstream)
+
+    def test_read_chunk_size_no_default_no_value(self):
+        with open(self.src_file, 'r') as src:
+            with open(self.dest_file, 'w') as dest:
+                src_splicefd = utils.SpliceFd(fd=src.fileno())
+                dest_splicefd = utils.SpliceFd(fd=dest.fileno())
+                utils.SplicePipe(source=src_splicefd,
+                                 sinks=[dest_splicefd])
+                self.assertRaises(ValueError,
+                                  src_splicefd.splice_data_downstream)
 
 
 if __name__ == '__main__':

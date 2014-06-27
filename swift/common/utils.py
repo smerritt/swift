@@ -56,6 +56,7 @@ import eventlet.semaphore
 from eventlet import GreenPool, sleep, Timeout, tpool, greenthread, \
     greenio, event
 from eventlet.green import socket, threading
+from eventlet.hubs import trampoline
 import eventlet.queue
 import netifaces
 import codecs
@@ -66,7 +67,6 @@ from swift import gettext_ as _
 import swift.common.exceptions
 from swift.common.http import is_success, is_redirection, HTTP_NOT_FOUND, \
     HTTP_PRECONDITION_FAILED, HTTP_REQUESTED_RANGE_NOT_SATISFIABLE
-
 
 # logging doesn't import patched as cleanly as one would like
 from logging.handlers import SysLogHandler
@@ -103,6 +103,8 @@ SWIFT_CONF_FILE = '/etc/swift/swift.conf'
 # These constants are Linux-specific, and Python doesn't seem to know
 # about them. We ask anyway just in case that ever gets fixed.
 AF_ALG = getattr(socket, 'AF_ALG', 38)
+F_SETPIPE_SZ = getattr(fcntl, 'F_SETPIPE_SZ', 1031)
+F_GETPIPE_SZ = getattr(fcntl, 'F_GETPIPE_SZ', 1032)
 
 
 class InvalidHashPathConfigError(ValueError):
@@ -3092,9 +3094,306 @@ def tee(fd_in, fd_out, length, flags):
     return ret
 
 
-def system_has_splice():
+def system_can_zero_copy_splice():
+    """
+    Returns True if libc and the kernel have all the necessary features to
+    support zero-copy with splice()/tee(); False otherwise.
+    """
+
     try:
         load_libc_function('splice', fail_if_missing=True)
-        return True
+        load_libc_function('tee', fail_if_missing=True)
     except AttributeError:
         return False
+
+    # old kernels don't support fcntl with F_GETPIPE_SZ/F_SETPIPE_SZ
+    rfd, wfd = os.pipe()
+    try:
+        fcntl.fcntl(rfd, F_GETPIPE_SZ, 0)
+    except OSError:
+        return False
+    finally:
+        os.close(rfd)
+        os.close(wfd)
+    return True
+
+
+class SpliceTimeout(Timeout):
+    pass
+
+
+class SpliceFd(object):
+    """
+    Wrap up a file descriptor for use in a splice chain.
+
+    A splice chain is an alternating series of SpliceFd and SplicePipe
+    objects. Since the splice() syscall transfers data from an fd to a pipe or
+    from a pipe to an fd, you have to have a SplicePipe between SpliceFds.
+    """
+    def __init__(self, fd, timeout=None, read_chunk_size=None):
+        """
+        :param fd: open file descriptor
+        :param timeout: timeout for splices to/from fd
+        :param read_chunk_size: how many bytes to splice at a time; default
+                                is the number requested (one big chunk)
+
+        Note: this object does not close fd; that remains the responsibility
+              of the caller.
+        """
+        self._fd = fd
+        self._timeout = timeout
+        self._read_chunk_size = read_chunk_size
+
+        self._upstream = None
+        self._downstream = None
+
+    def splice_data_downstream(self, nbytes=None, read_fd=None):
+        """
+        Called when data is available for reading. Writes it to sinkfd, then
+        notifies the downstream chain link (if any) of its presence.
+
+        :param nbytes: Number of bytes to try to read. If None, defaults to
+                       read_chunk_size.
+
+        :returns: Number of bytes read; this may be less than $nbytes.
+        """
+        if nbytes is None:
+            nbytes = self._read_chunk_size
+        if nbytes is None:
+            raise ValueError("No read_chunk_size and no nbytes")
+
+        # First, pull data from our upstream (if any)
+        if read_fd is not None:
+            nbytes = self._splice_data(read_fd, self._fd, nbytes, read=False)
+
+        if nbytes == 0:  # EOF
+            return 0
+
+        # Push that to our downstream (if any)
+        if self._downstream:
+            if nbytes > self._downstream.pipe_capacity:
+                # Otherwise, we'll fill the pipe, and we'll either block
+                # forever *or* get EWOULDBLOCK and then loop forever
+                # trampolining on self._fd (not the pipe fd).
+                raise ValueError("nbytes too big for pipe (%d > %d)" %
+                                 (nbytes, self._downstream.pipe_capacity))
+
+            nwritten = self._splice_data(self._fd, self._downstream.write_fd,
+                                         nbytes, read=True)
+            self._downstream.pipe_data_downstream(nwritten)
+            return nwritten
+        return nbytes
+
+    def _splice_data(self, read_fd, write_fd, nbytes, read=True):
+        bytes_moved = 0
+        while nbytes > 0:
+            if self._read_chunk_size:
+                to_read = min(self._read_chunk_size or 0, nbytes)
+            else:
+                to_read = nbytes
+
+            nread = self.call_splice(
+                read_fd, 0, write_fd, 0, to_read, SPLICE_F_MORE)
+            if nread is None:  # EWOULDBLOCK
+                if read:
+                    trampoline(self._fd, read=True)
+                else:
+                    trampoline(self._fd, write=True)
+            elif nread == 0:  # EOF
+                break
+            else:
+                bytes_moved += nread
+                nbytes -= nread
+        return bytes_moved
+
+    def call_splice(self, in_fd, off_in, out_fd, off_out, count, flags):
+        """
+        Call splice() while performing any necessary bookkeeping.
+        """
+        with SpliceTimeout(self._timeout):
+            return splice(in_fd, off_in, out_fd, off_out, count, flags)
+
+    def pull_data(self, nbytes):
+        """
+        Pull some data downstream.
+
+        If one has the first in a splice chain, one calls
+        .splice_data_downstream() to move data. However, if all one has
+        available is the tail, then some manner of requesting data is
+        required, and so we have this method.
+
+        :param nbytes: Number of bytes to try to read from the source.
+        :returns: Number of bytes moved to the sink. Might be less than the
+                  number of bytes requested if EOF was encountered.
+        """
+        if self._upstream:
+            return self._upstream.pull_data(nbytes)
+        else:
+            return self.splice_data_downstream(nbytes)
+
+    def close(self, _direction="both"):
+        """
+        Release resources. It is the responsibility of the user to call
+        .close(); failure to do so may result in resource leaks.
+
+        .close() may be called on any link in a splice chain; it will
+        propagate.
+        """
+        # The owner of this object is responsible for closing the file/socket
+        # fd, so we simply propagate the message along.
+        if _direction != "up" and self._downstream:
+            self._downstream.close("down")
+        if _direction != "down" and self._upstream:
+            self._upstream.close("up")
+
+    def sideload_data(self, data):
+        """
+        Take some user-space data and run it down the chain.
+
+        Useful if you're reading from a socket and have some buffered data,
+        but there's more to come, and you'd like to splice as much as
+        possible.
+        """
+        if self._upstream:
+            return self._upstream.sideload_data(data)
+
+        write_fd = self._downstream.write_fd  # will be a pipe
+        while data:
+            # write the data in chunks so that we don't block
+            to_write = data[:self._read_chunk_size]
+            nwritten = os.write(write_fd, to_write)
+            data = data[nwritten:]
+            self._downstream.pipe_data_downstream(nwritten)
+
+
+class SplicePipe(object):
+    """
+    A pipe for use in a splice chain. Takes data from a SpliceFd and
+    distributes it to one or more SpliceFds in a zero-copy manner.
+
+    Note: you must call .close() on the SplicePipe (or any other link in
+    its splice chain) in order to close the underlying kernel pipe. Failure to
+    do so will result in a file-descriptor leak.
+    """
+    def __init__(self, source, sinks, pipe_size=None):
+        """
+        :param source: SpliceFd to read from
+        :param sinks: SpliceFds to write to. At least one must be provided.
+        :param pipe_size: pipe-buffer size to use. Note that one must move
+                          data in chunks at most $pipe_size bytes long;
+                          attempting to move more than that wil result in an
+                          error. If None, the kernel default pipe size will
+                          be used.
+        """
+        if not sinks:
+            raise ValueError("No sinks provided")
+
+        self._source = source
+        self._sinks = sinks
+
+        self._rpipefd, self._wpipefd = os.pipe()
+        # Make sure these are set nonblocking so that we might get exceptions
+        # instead of hangs if our byte-counting goes awry.
+        self._set_nonblocking(self._rpipefd)
+        self._set_nonblocking(self._wpipefd)
+
+        if pipe_size is not None:
+            # The kernel gives us at least $pipe_size bytes, but may give
+            # more. Let's use all of what we got.
+            self._pipe_size = fcntl.fcntl(self._rpipefd, F_SETPIPE_SZ,
+                                          pipe_size)
+        else:
+            self._pipe_size = fcntl.fcntl(self._rpipefd, F_GETPIPE_SZ, 0)
+
+        if len(sinks) > 1:
+            # splice() consumes the data, so to send it multiple places, we
+            # need to use tee() to copy the data over to another pipe prior to
+            # splicing. (It's not a real copy, though, just in-kernel pointer
+            # manipulation.)
+            self._rteepipefd, self._wteepipefd = os.pipe()
+            self._set_nonblocking(self._rteepipefd)
+            self._set_nonblocking(self._wteepipefd)
+            fcntl.fcntl(self._rteepipefd, F_SETPIPE_SZ, self._pipe_size)
+
+        source._downstream = self
+        for sink in sinks:
+            sink._upstream = self
+
+    @property
+    def write_fd(self):
+        return self._wpipefd
+
+    @property
+    def pipe_capacity(self):
+        return self._pipe_size
+
+    def _set_nonblocking(self, fd):
+        flags = fcntl.fcntl(fd, fcntl.F_GETFL)
+        flags |= os.O_NONBLOCK
+        fcntl.fcntl(fd, fcntl.F_SETFL, flags)
+
+    def sideload_data(self, data):
+        return self._source.sideload_data(data)
+
+    def pipe_data_downstream(self, nbytes):
+        """
+        Tell our sinks to pull from our pipe(s).
+
+        Splices up to $nbytes bytes from upstream and sends it to each sink.
+
+        :param nbytes: How many bytes are in our pipe
+        """
+
+        sink = self._sinks[-1]
+        tees = self._sinks[:-1]
+
+        # If we need to tee the data anywhere, do that first while we still
+        # have a copy.
+        for tee_downstream in tees:
+            bytes_teed = tee(self._rpipefd, self._wteepipefd, nbytes,
+                             SPLICE_F_MORE)
+            if bytes_teed != nbytes:
+                # We teed data between two pipes of equal size, and the
+                # destination pipe was empty, but somehow there wasn't enough
+                # room...? This should never happen.
+                raise Exception("tee() failed: tried to copy %d bytes, "
+                                "but only moved %d" %
+                                (nbytes, bytes_teed))
+            tee_downstream.splice_data_downstream(nbytes, self._rteepipefd)
+
+        nread = sink.splice_data_downstream(nbytes, self._rpipefd)
+        if nread != nbytes:
+            raise ValueError("Downstream failed to consume all data!\n"
+                             "%r took %d of %d bytes" %
+                             (sink, nread, nbytes))
+
+    def pull_data(self, nbytes):
+        return self._source.pull_data(nbytes)
+
+    def close(self, _direction="both"):
+        """
+        Takes care of any necessary finalization, i.e. closing our pipes. It is
+        the responsibility of the user to call .close(); failure to do so may
+        result in resource leaks.
+
+        .close() may be called on any link in a splice chain and it will
+        propagate outwards to the ends.
+        """
+        if self._rpipefd:
+            os.close(self._rpipefd)
+            self._rpipefd = None
+        if self._wpipefd:
+            os.close(self._wpipefd)
+            self._wpipefd = None
+        if self._rteepipefd:
+            os.close(self._rteepipefd)
+            self._rteepipefd = None
+        if self._wteepipefd:
+            os.close(self._wteepipefd)
+            self._wteepipefd = None
+
+        if _direction != "up":
+            for sink in self._sinks:
+                sink.close("down")
+        if _direction != "down" and self._upstream:
+            self._upstream.close("up")

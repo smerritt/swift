@@ -4107,7 +4107,7 @@ class TestZeroCopy(unittest.TestCase):
     """Test the object server's zero-copy functionality"""
 
     def _system_can_zero_copy(self):
-        if not utils.system_has_splice():
+        if not utils.system_can_zero_copy_splice():
             return False
 
         try:
@@ -4146,11 +4146,12 @@ class TestZeroCopy(unittest.TestCase):
         self.wsgi_greenlet.kill()
         rmtree(self.testdir)
 
-    def test_GET(self):
-        url_path = '/sda1/2100/a/c/o'
+    def test_PUT_then_GET(self):
+        timestamp = normalize_timestamp(time())
 
+        url_path = '/sda1/2100/a/c/o'
         self.http_conn.request('PUT', url_path, 'obj contents',
-                               {'X-Timestamp': '127082564.24709'})
+                               {'X-Timestamp': timestamp})
         response = self.http_conn.getresponse()
         self.assertEqual(response.status, 201)
         response.read()
@@ -4161,23 +4162,77 @@ class TestZeroCopy(unittest.TestCase):
         contents = response.read()
         self.assertEqual(contents, 'obj contents')
 
-    def test_GET_big(self):
+    def test_PUT_then_GET_big(self):
         # Test with a large-ish object to make sure we handle full socket
         # buffers correctly.
-        obj_contents = 'A' * 4 * 1024 * 1024  # 4 MiB
+        obj_contents = 'A' * (4 * 1024 * 1024 + 1)  # 4 MiB + 1 B
         url_path = '/sda1/2100/a/c/o'
-
+        obj_file = os.path.join(
+            self.testdir, 'sda1',
+            storage_directory(diskfile.get_data_dir(0), '2100',
+                              hash_path('a', 'c', 'o')))
         self.http_conn.request('PUT', url_path, obj_contents,
                                {'X-Timestamp': '1402600322.52126'})
         response = self.http_conn.getresponse()
         self.assertEqual(response.status, 201)
+        self.assertEqual(response.getheader('Etag'),
+                         '"' + md5(obj_contents).hexdigest() + '"')
         response.read()
+        self.assertTrue(os.path.exists(obj_file))
 
         self.http_conn.request('GET', url_path)
         response = self.http_conn.getresponse()
         self.assertEqual(response.status, 200)
         contents = response.read()
         self.assertEqual(contents, obj_contents)
+
+        # make sure it didn't get quarantined
+        self.assertTrue(os.path.exists(obj_file))
+
+    def test_PUT_uses_reasonable_buffer_size(self):
+        url_path = '/sda1/589/a/c/o-bufsize-test'
+        timestamp = normalize_timestamp(time())
+
+        # If the user's requested network_chunk_size is bigger than the max
+        # pipe size, we have to use the smaller of the two.
+        with open('/proc/sys/fs/pipe-max-size') as f:
+            max_pipe_size = int(f.read())
+
+        self.object_controller.network_chunk_size = max_pipe_size + 1
+        obj_contents = 'Q' * max_pipe_size * 2
+
+        with Timeout(30):  # in case of hangs
+            self.http_conn.request('PUT', url_path, obj_contents,
+                                   {'X-Timestamp': timestamp})
+            response = self.http_conn.getresponse()
+            response.read()
+            self.assertEqual(response.status, 201)
+
+    def test_PUT_checks_etag(self):
+        obj_contents = 'A' * 128 * 1024  # enough to fill the input buffer
+        url_path = '/sda1/6816/a/c/o-etag-test'
+        obj_file = os.path.join(
+            self.testdir, 'sda1',
+            storage_directory(diskfile.get_data_dir(0), '6816',
+                              hash_path('a', 'c', 'o-etag-test')))
+        right_etag = md5(obj_contents).hexdigest()
+        wrong_etag = md5("\xf0\x9f\x92\xa9").hexdigest()
+
+        self.http_conn.request('PUT', url_path, obj_contents,
+                               {'X-Timestamp': '1402600322.52126',
+                                'Etag': wrong_etag})
+        response = self.http_conn.getresponse()
+        response.read()
+        self.assertEqual(response.status, 422)
+        self.assertFalse(os.path.exists(obj_file))
+
+        self.http_conn.request('PUT', url_path, obj_contents,
+                               {'X-Timestamp': '1402600322.52126',
+                                'Etag': right_etag})
+        response = self.http_conn.getresponse()
+        response.read()
+        self.assertEqual(response.status, 201)
+        self.assertTrue(os.path.exists(obj_file))
 
     def test_quarantine(self):
         obj_hash = hash_path('a', 'c', 'o')
@@ -4209,7 +4264,7 @@ class TestZeroCopy(unittest.TestCase):
         self.assertEqual(response.status, 404)
         response.read()
 
-    def test_quarantine_on_well_formed_zero_byte_file(self):
+    def test_no_quarantine_on_well_formed_zero_byte_file(self):
         # Make sure we work around an oddity in Linux's hash sockets
         url_path = '/sda1/2100/a/c/o'
         ts = '1402700497.71333'
@@ -4232,6 +4287,29 @@ class TestZeroCopy(unittest.TestCase):
         self.assertEqual(response.status, 200)  # still there
         contents = response.read()
         self.assertEqual(contents, '')
+
+    def test_max_upload_time(self):
+        the_time = [time()]
+
+        def fake_time():
+            the_time[0] += 1
+            return the_time[0]
+
+        self.object_controller.max_upload_time = 3
+        self.object_controller.disk_chunk_size = 4096
+        self.object_controller.network_chunk_size = 4096
+
+        obj_contents = 'A' * 128 * 1024
+        url_path = '/sda1/15/a/c/o-max-upload-time'
+
+        with mock.patch('swift.obj.diskfile.time.time', fake_time):
+            with mock.patch('swift.obj.server.time.time', fake_time):
+                self.http_conn.request(
+                    'PUT', url_path, obj_contents,
+                    {'X-Timestamp': normalize_timestamp(the_time[0])})
+                response = self.http_conn.getresponse()
+                response.read()
+        self.assertEqual(response.status, 408)
 
 
 if __name__ == '__main__':

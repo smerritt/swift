@@ -15,6 +15,7 @@
 
 """ Object Server for Swift """
 
+import contextlib
 import cPickle as pickle
 import os
 import multiprocessing
@@ -29,7 +30,8 @@ from eventlet import sleep, wsgi, Timeout
 
 from swift.common.utils import public, get_logger, \
     config_true_value, timing_stats, replication, \
-    normalize_delete_at_timestamp, get_log_line, Timestamp
+    normalize_delete_at_timestamp, get_log_line, Timestamp, \
+    SpliceFd, SpliceTimeout
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, \
     valid_timestamp, check_utf8
@@ -419,35 +421,39 @@ class ObjectController(object):
             return HTTPConflict(request=request)
         orig_delete_at = int(orig_metadata.get('X-Delete-At') or 0)
         upload_expiration = time.time() + self.max_upload_time
-        etag = md5()
-        elapsed_time = 0
         try:
             with disk_file.create(size=fsize) as writer:
-                upload_size = 0
+                wsgi_input = request.environ['wsgi.input']
+                sock = self._extract_socket(wsgi_input)
+                checker = getattr(writer, 'can_zero_copy_receive', None)
 
-                def timeout_reader():
-                    with ChunkReadTimeout(self.client_timeout):
-                        return request.environ['wsgi.input'].read(
-                            self.network_chunk_size)
+                if (request.headers.get('transfer-encoding', '') != 'chunked'
+                   and sock and checker and checker()):
+                    # flush out the "100 Continue" line if the other end
+                    # expects it; otherwise no-op. After this, the other end
+                    # is definitely going to send us some data.
+                    wsgi_input.read(0)
 
-                try:
-                    for chunk in iter(lambda: timeout_reader(), ''):
-                        start_time = time.time()
-                        if start_time > upload_expiration:
-                            self.logger.increment('PUT.timeouts')
-                            return HTTPRequestTimeout(request=request)
-                        etag.update(chunk)
-                        upload_size = writer.write(chunk)
-                        elapsed_time += time.time() - start_time
-                except ChunkReadTimeout:
-                    return HTTPRequestTimeout(request=request)
+                    try:
+                        upload_size, etag, elapsed_time = \
+                            self._zero_copy_obj_to_disk(
+                                request, wsgi_input, sock, writer, fsize,
+                                upload_expiration)
+                        # Don't let eventlet.wsgi think it has more to read
+                        wsgi_input.content_length = 0
+                    except SpliceTimeout:
+                        return HTTPRequestTimeout(request=request)
+                else:
+                    upload_size, etag, elapsed_time = \
+                        self._write_obj_to_disk(request, writer,
+                                                upload_expiration)
+
                 if upload_size:
                     self.logger.transfer_rate(
                         'PUT.' + device + '.timing', elapsed_time,
                         upload_size)
                 if fsize is not None and fsize != upload_size:
-                    return HTTPClientDisconnect(request=request)
-                etag = etag.hexdigest()
+                    raise HTTPClientDisconnect(request=request)
                 if 'etag' in request.headers and \
                         request.headers['etag'].lower() != etag:
                     return HTTPUnprocessableEntity(request=request)
@@ -486,6 +492,85 @@ class ObjectController(object):
                 'x-etag': metadata['ETag']}),
             device, policy_idx)
         return HTTPCreated(request=request, etag=etag)
+
+    def _extract_socket(self, wsgi_input):
+        """
+        Try to get the socket object out from the request, disregarding
+        encapsulation.
+
+        :returns: socket if able, or None
+        """
+        if isinstance(wsgi_input, wsgi.Input):
+            return wsgi_input.get_socket()
+
+    def _write_obj_to_disk(self, request, writer, upload_expiration):
+        etag = md5()
+        upload_size = 0
+        elapsed_time = 0
+
+        def timeout_reader():
+            with ChunkReadTimeout(self.client_timeout):
+                return request.environ['wsgi.input'].read(
+                    self.network_chunk_size)
+
+        try:
+            for chunk in iter(lambda: timeout_reader(), ''):
+                start_time = time.time()
+                if start_time > upload_expiration:
+                    self.logger.increment('PUT.timeouts')
+                    raise HTTPRequestTimeout(request=request)
+                etag.update(chunk)
+                upload_size = writer.write(chunk)
+                elapsed_time += time.time() - start_time
+        except ChunkReadTimeout:
+            raise HTTPRequestTimeout(request=request)
+        return (upload_size, etag.hexdigest(), elapsed_time)
+
+    def _zero_copy_obj_to_disk(self, request, wsgi_input, sock, writer, fsize,
+                               upload_expiration):
+        # Some object contents may be buffered in user-space memory, so we
+        # need to drain all those buffers. Further, we need to do it without
+        # causing any more reads from the socket. Also, these buffers are not
+        # intended to be accessible, so there's no nice API to drain them.
+        #
+        # Instead, we sneak around behind the WSGI server and temporarily
+        # replace its socket with Folgers crystals^W^W a half-closed socket
+        # that has no data available for reading. Then, once we've drained
+        # everything out of the buffers, we put the original socket back and
+        # proceed.
+
+        sockfd = sock.fileno()
+
+        # Make a new socket to swap with our original socket
+        new_sock1, new_sock2 = socket.socketpair()
+        with contextlib.nested(
+                contextlib.closing(new_sock1),
+                contextlib.closing(new_sock2)):
+            sockfd = wsgi_input.get_socket().fileno()
+            duplicate_sockfd = os.dup(sockfd)
+            try:
+                # The new socket is now out of data / at EOF...
+                new_sock1.shutdown(socket.SHUT_RD)
+
+                # and now wsgi_input is reading from it...
+                os.dup2(new_sock1.fileno(), sockfd)
+
+                # so anything this finds came from buffers, and since we don't
+                # specify a length, we get everything
+                buffered_obj_contents = wsgi_input.read()
+            finally:
+                # Put it back in case we want to re-use the socket later
+                # (maybe to SEND A RESPONSE or something)
+                os.dup2(duplicate_sockfd, sockfd)
+                os.close(duplicate_sockfd)
+
+        source_splice_fd = SpliceFd(fd=sockfd, timeout=self.client_timeout)
+        upload_size, etag, elapsed_time = writer.zero_copy_receive(
+            source_splice_fd, self.network_chunk_size, fsize,
+            buffered_obj_contents, upload_expiration)
+        if upload_size is None and etag is None and elapsed_time is None:
+            raise HTTPRequestTimeout(request=request)
+        return (upload_size, etag, elapsed_time)
 
     @public
     @timing_stats()
@@ -721,16 +806,15 @@ class ObjectController(object):
         #
         # There's almost certainly an analogous form for zero-copy PUT
         # requests.
-        if req.method == 'GET' and res.status_int == 200 and \
-           isinstance(env['wsgi.input'], wsgi.Input):
+        if req.method == 'GET' and res.status_int == 200:
+            wsock = self._extract_socket(env['wsgi.input'])
             app_iter = getattr(res, 'app_iter', None)
             checker = getattr(app_iter, 'can_zero_copy_send', None)
-            if checker and checker():
+            if wsock and checker and checker():
                 # For any kind of zero-copy thing like sendfile or splice, we
                 # need the file descriptor. Eventlet doesn't provide a clean
                 # way of getting that, so we resort to this.
-                wsock = env['wsgi.input'].get_socket()
-                wsockfd = wsock.fileno()
+                wsplicefd = SpliceFd(fd=wsock.fileno())
 
                 # Don't call zero_copy_send() until after we force the HTTP
                 # headers out of Eventlet and into the socket.
@@ -749,7 +833,7 @@ class ObjectController(object):
                                          socket.TCP_CORK, 1)
                     yield EventletPlungerString()
                     try:
-                        app_iter.zero_copy_send(wsockfd)
+                        app_iter.zero_copy_send(wsplicefd)
                     except Exception:
                         self.logger.exception("zero_copy_send() blew up")
                         raise
