@@ -44,7 +44,7 @@ from swift.common import utils, storage_policy, bufferedhttp
 from swift.common.utils import hash_path, mkdirs, normalize_timestamp, \
     NullLogger, storage_directory, public, replication
 from swift.common import constraints
-from swift.common.swob import Request, HeaderKeyDict
+from swift.common.swob import Request, HeaderKeyDict, WsgiStringIO
 from swift.common.storage_policy import POLICIES
 from swift.common.exceptions import DiskFileDeviceUnavailable
 
@@ -732,7 +732,7 @@ class TestObjectController(unittest.TestCase):
                 headers={'X-Timestamp': timestamp,
                          'Content-Type': 'text/plain',
                          'Content-Length': '6'})
-            req.environ['wsgi.input'] = StringIO('VERIFY')
+            req.environ['wsgi.input'] = WsgiStringIO('VERIFY')
             resp = req.get_response(self.object_controller)
             self.assertEquals(resp.status_int, 408)
 
@@ -2125,7 +2125,7 @@ class TestObjectController(unittest.TestCase):
 
     def test_call_bad_request(self):
         # Test swift.obj.server.ObjectController.__call__
-        inbuf = StringIO()
+        inbuf = WsgiStringIO()
         errbuf = StringIO()
         outbuf = StringIO()
 
@@ -2152,7 +2152,7 @@ class TestObjectController(unittest.TestCase):
         self.assertEquals(outbuf.getvalue()[:4], '400 ')
 
     def test_call_not_found(self):
-        inbuf = StringIO()
+        inbuf = WsgiStringIO()
         errbuf = StringIO()
         outbuf = StringIO()
 
@@ -2179,7 +2179,7 @@ class TestObjectController(unittest.TestCase):
         self.assertEquals(outbuf.getvalue()[:4], '404 ')
 
     def test_call_bad_method(self):
-        inbuf = StringIO()
+        inbuf = WsgiStringIO()
         errbuf = StringIO()
         outbuf = StringIO()
 
@@ -2215,7 +2215,7 @@ class TestObjectController(unittest.TestCase):
         with mock.patch("swift.obj.diskfile.hash_path", my_hash_path):
             with mock.patch("swift.obj.server.check_object_creation",
                             my_check):
-                inbuf = StringIO()
+                inbuf = WsgiStringIO()
                 errbuf = StringIO()
                 outbuf = StringIO()
 
@@ -2244,7 +2244,7 @@ class TestObjectController(unittest.TestCase):
                 self.assertEquals(errbuf.getvalue(), '')
                 self.assertEquals(outbuf.getvalue()[:4], '201 ')
 
-                inbuf = StringIO()
+                inbuf = WsgiStringIO()
                 errbuf = StringIO()
                 outbuf = StringIO()
 
@@ -2395,6 +2395,9 @@ class TestObjectController(unittest.TestCase):
                     return ' '
                 return ''
 
+            def set_hundred_continue_response_headers(*a, **kw):
+                pass
+
         req = Request.blank(
             '/sda1/p/a/c/o',
             environ={'REQUEST_METHOD': 'PUT', 'wsgi.input': SlowBody()},
@@ -2423,6 +2426,9 @@ class TestObjectController(unittest.TestCase):
                     self.sent = True
                     return '   '
                 return ''
+
+            def set_hundred_continue_response_headers(*a, **kw):
+                pass
 
         req = Request.blank(
             '/sda1/p/a/c/o',
@@ -4023,7 +4029,7 @@ class TestObjectController(unittest.TestCase):
     def test_correct_allowed_method(self):
         # Test correct work for allowed method using
         # swift.obj.server.ObjectController.__call__
-        inbuf = StringIO()
+        inbuf = WsgiStringIO()
         errbuf = StringIO()
         outbuf = StringIO()
         self.object_controller = object_server.app_factory(
@@ -4061,7 +4067,7 @@ class TestObjectController(unittest.TestCase):
     def test_not_allowed_method(self):
         # Test correct work for NOT allowed method using
         # swift.obj.server.ObjectController.__call__
-        inbuf = StringIO()
+        inbuf = WsgiStringIO()
         errbuf = StringIO()
         outbuf = StringIO()
         self.object_controller = object_server.ObjectController(
@@ -4113,7 +4119,7 @@ class TestObjectController(unittest.TestCase):
                               {})])
 
     def test_not_utf8_and_not_logging_requests(self):
-        inbuf = StringIO()
+        inbuf = WsgiStringIO()
         errbuf = StringIO()
         outbuf = StringIO()
         self.object_controller = object_server.ObjectController(
@@ -4152,7 +4158,7 @@ class TestObjectController(unittest.TestCase):
                              [])
 
     def test__call__returns_500(self):
-        inbuf = StringIO()
+        inbuf = WsgiStringIO()
         errbuf = StringIO()
         outbuf = StringIO()
         self.object_controller = object_server.ObjectController(
@@ -4200,7 +4206,7 @@ class TestObjectController(unittest.TestCase):
                              [])
 
     def test_PUT_slow(self):
-        inbuf = StringIO()
+        inbuf = WsgiStringIO()
         errbuf = StringIO()
         outbuf = StringIO()
         self.object_controller = object_server.ObjectController(

@@ -3617,7 +3617,7 @@ class TestObjectController(unittest.TestCase):
             given_headers = {}
 
             def fake_connect_put_node(nodes, part, path, headers,
-                                      logger_thread_locals):
+                                      logger_thread_locals, chunked):
                 given_headers.update(headers)
 
             controller = proxy_server.ObjectController(self.app, 'a',
@@ -3642,7 +3642,7 @@ class TestObjectController(unittest.TestCase):
             given_headers = {}
 
             def fake_connect_put_node(nodes, part, path, headers,
-                                      logger_thread_locals):
+                                      logger_thread_locals, chunked):
                 given_headers.update(headers)
 
             controller = proxy_server.ObjectController(self.app, 'a',

@@ -64,6 +64,10 @@ class FakeServerConnection(WSGIContext):
     def getexpect(self):
         class ContinueResponse(object):
             status = 100
+
+            def getheaders(self):
+                return []
+
         return ContinueResponse()
 
     def send(self, data):

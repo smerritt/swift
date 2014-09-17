@@ -418,6 +418,10 @@ class ObjectController(object):
             with disk_file.create(size=fsize) as writer:
                 upload_size = 0
 
+                request.environ['wsgi.input'].set_hundred_continue_response_headers(
+                    [('Argyle', 'Sock'),
+                     ('Bucky', 'Balls')])
+
                 def timeout_reader():
                     with ChunkReadTimeout(self.client_timeout):
                         return request.environ['wsgi.input'].read(
