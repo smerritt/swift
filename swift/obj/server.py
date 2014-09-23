@@ -20,6 +20,7 @@ import os
 import multiprocessing
 import time
 import traceback
+import rfc822
 import socket
 import math
 from swift import gettext_ as _
@@ -30,7 +31,7 @@ from eventlet import sleep, Timeout
 from swift.common.utils import public, get_logger, \
     config_true_value, timing_stats, replication, \
     normalize_delete_at_timestamp, get_log_line, Timestamp, \
-    get_expirer_container
+    get_expirer_container, iter_multipart_mime_documents
 from swift.common.bufferedhttp import http_connect
 from swift.common.constraints import check_object_creation, \
     valid_timestamp, check_utf8
@@ -48,6 +49,12 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPCreated, \
     HTTPInsufficientStorage, HTTPForbidden, HTTPException, HeaderKeyDict, \
     HTTPConflict
 from swift.obj.diskfile import DATAFILE_SYSTEM_META, DiskFileManager
+
+
+def mime_headers_and_bodies(mime_documents_iter):
+    for file_like in mime_documents_iter:
+        hdrs = rfc822.Message(file_like, 0)
+        yield (hdrs, file_like)
 
 
 class ObjectController(object):
@@ -418,13 +425,42 @@ class ObjectController(object):
             with disk_file.create(size=fsize) as writer:
                 upload_size = 0
 
-                request.environ['wsgi.input'].set_hundred_continue_response_headers(
-                    [('Argyle', 'Sock'),
-                     ('Bucky', 'Balls')])
+                # If the proxy wants to send us object metadata after the
+                # object body, it sets some headers. We have to tell the
+                # proxy, in the 100 Continue response, that we're able to
+                # parse a multipart MIME document and extract the object and
+                # metadata from it. If we don't, then the proxy won't
+                # actually send the footer metadata.
+                metadata_footer = False
+                mime_documents_iter = iter([])
+                obj_input = request.environ['wsgi.input']
+
+                if config_true_value(
+                        request.headers.get('X-Backend-Obj-Metadata-Footer')):
+                    metadata_footer = True
+                    mime_boundary = request.headers.get(
+                        'X-Backend-Obj-Multipart-Mime-Boundary')
+                    if not mime_boundary:
+                        return HTTPBadRequest("no MIME boundary")
+                    request.environ['wsgi.input'].\
+                        set_hundred_continue_response_headers(
+                            [('X-Obj-Metadata-Footer', 'yes')])
+
+                    mime_documents_iter = mime_headers_and_bodies(
+                        iter_multipart_mime_documents(
+                            request.environ['wsgi.input']))
+
+                    obj_doc_headers, obj_input = next(mime_documents_iter)
+
+                    # The Content-Length sent by the proxy is for the
+                    # object alone; once you add in the MIME stuff, it's
+                    # wrong, so clear it out so eventlet's wsgi.Input object
+                    # doesn't truncate the MIME document.
+                    request.environ['wsgi.input'].content_length = None
 
                 def timeout_reader():
                     with ChunkReadTimeout(self.client_timeout):
-                        return request.environ['wsgi.input'].read(
+                        return obj_input.read(
                             self.network_chunk_size)
 
                 try:
@@ -444,9 +480,20 @@ class ObjectController(object):
                         upload_size)
                 if fsize is not None and fsize != upload_size:
                     return HTTPClientDisconnect(request=request)
+
+                footer_meta = {}
+                if metadata_footer:
+                    try:
+                        footer_meta, _junk = next(mime_documents_iter)
+                    except StopIteration:
+                        # XXX is this the right thing to do? probably not...
+                        # maybe a 400 here?
+                        self.logger.warn("proxy sent us crap; what a jerk")
+
+                request_etag = (footer_meta.get('etag') or
+                                request.headers.get('etag', '')).lower()
                 etag = etag.hexdigest()
-                if 'etag' in request.headers and \
-                        request.headers['etag'].lower() != etag:
+                if request_etag and request_etag.lower() != etag:
                     return HTTPUnprocessableEntity(request=request)
                 metadata = {
                     'X-Timestamp': request.timestamp.internal,
@@ -455,6 +502,8 @@ class ObjectController(object):
                     'Content-Length': str(upload_size),
                 }
                 metadata.update(val for val in request.headers.iteritems()
+                                if is_sys_or_user_meta('object', val[0]))
+                metadata.update(val for val in footer_meta.iteritems()
                                 if is_sys_or_user_meta('object', val[0]))
                 for header_key in (
                         request.headers.get('X-Backend-Replication-Headers') or

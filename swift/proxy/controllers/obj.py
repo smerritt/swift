@@ -169,7 +169,7 @@ class Putter(object):
             message_parts = ["\r\n--%s\r\nX-Document: object metadata"]
             for header, value in footer_metadata:
                 message_parts.append("%s: %s" % (header, value))
-            message_parts.append("--%s--\r\n" % (self.mime_boundary,))
+            message_parts.append("\r\n--%s--\r\n" % (self.mime_boundary,))
             self.queue.put("\r\n".join(message_parts))
 
         self.queue.put('')
