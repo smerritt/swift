@@ -51,10 +51,18 @@ from swift.common.swob import HTTPAccepted, HTTPBadRequest, HTTPCreated, \
 from swift.obj.diskfile import DATAFILE_SYSTEM_META, DiskFileManager
 
 
-def mime_headers_and_bodies(mime_documents_iter):
+def iter_mime_headers_and_bodies(wsgi_input, mime_boundary, read_chunk_size):
+    mime_documents_iter = iter_multipart_mime_documents(
+        wsgi_input, mime_boundary, read_chunk_size)
+
     for file_like in mime_documents_iter:
-        hdrs = rfc822.Message(file_like, 0)
+        hdrs = HeaderKeyDict(rfc822.Message(file_like, 0))
         yield (hdrs, file_like)
+
+
+def drain(file_like, read_size):
+    for chunk in iter(lambda: file_like.read(read_size), ''):
+        pass
 
 
 class ObjectController(object):
@@ -431,13 +439,13 @@ class ObjectController(object):
                 # parse a multipart MIME document and extract the object and
                 # metadata from it. If we don't, then the proxy won't
                 # actually send the footer metadata.
-                metadata_footer = False
+                have_metadata_footer = False
                 mime_documents_iter = iter([])
                 obj_input = request.environ['wsgi.input']
 
                 if config_true_value(
                         request.headers.get('X-Backend-Obj-Metadata-Footer')):
-                    metadata_footer = True
+                    have_metadata_footer = True
                     mime_boundary = request.headers.get(
                         'X-Backend-Obj-Multipart-Mime-Boundary')
                     if not mime_boundary:
@@ -446,22 +454,15 @@ class ObjectController(object):
                         set_hundred_continue_response_headers(
                             [('X-Obj-Metadata-Footer', 'yes')])
 
-                    mime_documents_iter = mime_headers_and_bodies(
-                        iter_multipart_mime_documents(
-                            request.environ['wsgi.input']))
+                    mime_documents_iter = iter_mime_headers_and_bodies(
+                        request.environ['wsgi.input'],
+                        mime_boundary, self.network_chunk_size)
 
                     obj_doc_headers, obj_input = next(mime_documents_iter)
 
-                    # The Content-Length sent by the proxy is for the
-                    # object alone; once you add in the MIME stuff, it's
-                    # wrong, so clear it out so eventlet's wsgi.Input object
-                    # doesn't truncate the MIME document.
-                    request.environ['wsgi.input'].content_length = None
-
                 def timeout_reader():
                     with ChunkReadTimeout(self.client_timeout):
-                        return obj_input.read(
-                            self.network_chunk_size)
+                        return obj_input.read(self.network_chunk_size)
 
                 try:
                     for chunk in iter(lambda: timeout_reader(), ''):
@@ -482,13 +483,18 @@ class ObjectController(object):
                     return HTTPClientDisconnect(request=request)
 
                 footer_meta = {}
-                if metadata_footer:
+                if have_metadata_footer:
                     try:
-                        footer_meta, _junk = next(mime_documents_iter)
+                        footer_meta, _junk_body = next(mime_documents_iter)
+                        drain(_junk_body, self.network_chunk_size)
                     except StopIteration:
                         # XXX is this the right thing to do? probably not...
                         # maybe a 400 here?
                         self.logger.warn("proxy sent us crap; what a jerk")
+
+                # drain any remaining body from the socket
+                for _junk_headers, _junk_body in mime_documents_iter:
+                    drain(_junk_body, self.network_chunk_size)
 
                 request_etag = (footer_meta.get('etag') or
                                 request.headers.get('etag', '')).lower()

@@ -166,8 +166,9 @@ class Putter(object):
             footer_metadata = {}
 
         if self.mime_boundary:
-            message_parts = ["\r\n--%s\r\nX-Document: object metadata"]
-            for header, value in footer_metadata:
+            message_parts = ["\r\n--%s\r\nX-Document: object metadata" %
+                             self.mime_boundary]
+            for header, value in footer_metadata.items():
                 message_parts.append("%s: %s" % (header, value))
             message_parts.append("\r\n--%s--\r\n" % (self.mime_boundary,))
             self.queue.put("\r\n".join(message_parts))
@@ -216,8 +217,15 @@ class Putter(object):
         mime_boundary = None
 
         if want_metadata_footer or need_metadata_footer:
-            mime_boundary = "%.70x" % random.randint(0, 16 ** 70)
-            headers = headers.copy()
+            mime_boundary = "%.64x" % random.randint(0, 16 ** 64)
+            headers = HeaderKeyDict(headers)
+            # We're going to be adding some arbitrary amount of data to the
+            # request, so we can't use an explicit content length, and so we
+            # must use chunked encoding.
+            headers['Transfer-Encoding'] = 'chunked'
+            headers.pop('Content-Length', None)
+            chunked = True
+
             headers['X-Backend-Obj-Metadata-Footer'] = 'yes'
             headers['X-Backend-Obj-Multipart-Mime-Boundary'] = mime_boundary
 
@@ -244,7 +252,7 @@ class Putter(object):
         conn.resp = None
         if is_success(resp.status):
             conn.resp = resp
-        elif (headers['If-None-Match'] is not None and
+        elif (headers.get('If-None-Match', None) is not None and
               resp.status == HTTP_PRECONDITION_FAILED):
             conn.resp = resp
 
@@ -516,7 +524,8 @@ class ObjectController(Controller):
             conn.queue.task_done()
 
     def _connect_put_node(self, node_iter, part, path, headers,
-                          logger_thread_locals, chunked):
+                          logger_thread_locals, chunked,
+                          want_metadata_footer=False):
         """
         Connects to the first working node that it finds in node_iter and sends
         over the request headers. Returns a Putter to handle the rest of the
@@ -529,7 +538,7 @@ class ObjectController(Controller):
                     node, part, path, headers,
                     conn_timeout=self.app.conn_timeout,
                     node_timeout=self.app.node_timeout,
-                    chunked=chunked)
+                    chunked=chunked, want_metadata_footer=want_metadata_footer)
                 self.app.set_node_timing(node, putter.connect_duration)
                 return putter
             except InsufficientStorage:
@@ -830,7 +839,8 @@ class ObjectController(Controller):
                 nheaders['Expect'] = '100-continue'
             pile.spawn(self._connect_put_node, node_iter, partition,
                        req.swift_entity_path, nheaders,
-                       self.app.logger.thread_locals, chunked)
+                       self.app.logger.thread_locals, chunked,
+                       want_metadata_footer=('etag' not in req.headers))
 
         putters = [p for p in pile if p]
         min_puts = quorum_size(len(nodes))
