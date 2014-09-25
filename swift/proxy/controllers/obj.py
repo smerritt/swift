@@ -147,33 +147,54 @@ class Putter(object):
         if self.queue.unfinished_tasks:
             self.queue.join()
 
+    def _start_mime_doc(self):
+        self.queue.put("--%s\r\nX-Document: object body\r\n\r\n" %
+                       (self.mime_boundary,))
+
     def send_chunk(self, chunk):
+        if not chunk:
+            # If we're not using chunked transfer-encoding, sending a 0-byte
+            # chunk is just wasteful. If we *are* using chunked
+            # transfer-encoding, sending a 0-byte chunk terminates the
+            # request body. Neither one of these is good.
+            return
+        elif self.chunks_sent is None:
+            raise ValueError("called send_chunk after end_of_object_data")
+
         if self.chunks_sent == 0 and self.mime_boundary:
             # We're sending the object plus other stuff in the same request
-            # body, all wrapped up in multipart MIME. Start off the MIME
-            # document.
+            # body, all wrapped up in multipart MIME, so we'd better start
+            # off the MIME document before sending any object data.
             self.queue.put("--%s\r\nX-Document: object body\r\n\r\n" %
                            (self.mime_boundary,))
 
-        self.queue.put(chunk)
         self.chunks_sent += 1
+        self.queue.put(chunk)
 
     def end_of_object_data(self, footer_metadata=None):
         """
         Call when there is no more data to send.
         """
+        if self.chunks_sent is None:
+            raise ValueError("called end_of_object_data twice")
+        elif self.chunks_sent == 0 and self.mime_boundary:
+            self._start_mime_doc()
+
         if footer_metadata is None:
             footer_metadata = {}
 
         if self.mime_boundary:
-            message_parts = ["\r\n--%s\r\nX-Document: object metadata" %
+            message_parts = ["\r\n--%s\r\nX-Document: object metadata\r\n" %
                              self.mime_boundary]
             for header, value in footer_metadata.items():
-                message_parts.append("%s: %s" % (header, value))
-            message_parts.append("\r\n--%s--\r\n" % (self.mime_boundary,))
-            self.queue.put("\r\n".join(message_parts))
+                message_parts.append("%s: %s\r\n" % (header, value))
+            message_parts.append("\r\n--%s--" % (self.mime_boundary,))
+            self.queue.put("".join(message_parts))
 
         self.queue.put('')
+        # This might be a little confusing; maybe a separate flag? 3-state
+        # ratcheting state machine?
+        self.chunks_sent = None
 
     def _send_file(self, write_timeout, exception_handler):
         """
@@ -223,6 +244,7 @@ class Putter(object):
             # request, so we can't use an explicit content length, and so we
             # must use chunked encoding.
             headers['Transfer-Encoding'] = 'chunked'
+            headers['Expect'] = '100-continue'
             headers.pop('Content-Length', None)
             chunked = True
 

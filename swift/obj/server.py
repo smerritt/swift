@@ -454,15 +454,24 @@ class ObjectController(object):
                         set_hundred_continue_response_headers(
                             [('X-Obj-Metadata-Footer', 'yes')])
 
-                    mime_documents_iter = iter_mime_headers_and_bodies(
-                        request.environ['wsgi.input'],
-                        mime_boundary, self.network_chunk_size)
+                    # XXX wrap this up in a timeout, probably
+                    #
+                    # There's probably *lots* of places that now need
+                    # wrapping in client_timeout. Crapapples.
+                    try:
+                        with ChunkReadTimeout(self.client_timeout):
+                            mime_documents_iter = iter_mime_headers_and_bodies(
+                                request.environ['wsgi.input'],
+                                mime_boundary, self.network_chunk_size)
 
-                    obj_doc_headers, obj_input = next(mime_documents_iter)
+                            _junk_headers, obj_input = next(mime_documents_iter)
+                    except ChunkReadTimeout:
+                        return HTTPRequestTimeout(request=request)
 
                 def timeout_reader():
                     with ChunkReadTimeout(self.client_timeout):
-                        return obj_input.read(self.network_chunk_size)
+                        chunk = obj_input.read(self.network_chunk_size)
+                        return chunk
 
                 try:
                     for chunk in iter(lambda: timeout_reader(), ''):

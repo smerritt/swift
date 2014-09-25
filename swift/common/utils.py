@@ -3073,7 +3073,8 @@ def iter_multipart_mime_documents(wsgi_input, boundary, read_chunk_size=4096):
     :raises: MimeInvalid if the document is malformed
     """
     boundary = '--' + boundary
-    got = wsgi_input.readline(len(boundary + '\r\n'))
+    blen = len(boundary) + 2  # \r\n
+    got = wsgi_input.readline(blen)
     if got.strip() != boundary:
         raise swift.common.exceptions.MimeInvalid(
             'invalid starting boundary: wanted %r, got %r', (boundary, got))
