@@ -86,6 +86,11 @@ def check_content_type(req):
     return None
 
 
+NO_DATA_SENT = 1
+SENDING_DATA = 2
+DONE_SENDING = 3
+
+
 class Putter(object):
     """
     An HTTP PUT request that supports streaming.
@@ -106,7 +111,7 @@ class Putter(object):
 
         self.failed = False
         self.queue = None
-        self.chunks_sent = 0
+        self.state = NO_DATA_SENT
 
     def current_status(self):
         """
@@ -158,26 +163,26 @@ class Putter(object):
             # transfer-encoding, sending a 0-byte chunk terminates the
             # request body. Neither one of these is good.
             return
-        elif self.chunks_sent is None:
+        elif self.state == DONE_SENDING:
             raise ValueError("called send_chunk after end_of_object_data")
 
-        if self.chunks_sent == 0 and self.mime_boundary:
+        if self.state == NO_DATA_SENT and self.mime_boundary:
             # We're sending the object plus other stuff in the same request
             # body, all wrapped up in multipart MIME, so we'd better start
             # off the MIME document before sending any object data.
             self.queue.put("--%s\r\nX-Document: object body\r\n\r\n" %
                            (self.mime_boundary,))
+            self.state = SENDING_DATA
 
-        self.chunks_sent += 1
         self.queue.put(chunk)
 
     def end_of_object_data(self, footer_metadata=None):
         """
         Call when there is no more data to send.
         """
-        if self.chunks_sent is None:
+        if self.state == DONE_SENDING:
             raise ValueError("called end_of_object_data twice")
-        elif self.chunks_sent == 0 and self.mime_boundary:
+        elif self.state == NO_DATA_SENT and self.mime_boundary:
             self._start_mime_doc()
 
         if footer_metadata is None:
@@ -192,9 +197,7 @@ class Putter(object):
             self.queue.put("".join(message_parts))
 
         self.queue.put('')
-        # This might be a little confusing; maybe a separate flag? 3-state
-        # ratcheting state machine?
-        self.chunks_sent = None
+        self.state = DONE_SENDING
 
     def _send_file(self, write_timeout, exception_handler):
         """
