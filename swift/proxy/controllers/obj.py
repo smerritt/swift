@@ -866,7 +866,8 @@ class ObjectController(Controller):
             pile.spawn(self._connect_put_node, node_iter, partition,
                        req.swift_entity_path, nheaders,
                        self.app.logger.thread_locals, chunked,
-                       want_metadata_footer=('etag' not in req.headers))
+                       want_metadata_footer=('etag' not in req.headers
+                                             and req.content_length != 0))
 
         putters = [p for p in pile if p]
         min_puts = quorum_size(len(nodes))
