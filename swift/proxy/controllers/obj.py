@@ -792,6 +792,7 @@ class ObjectController(Controller):
             sink_req = Request.blank(req.path_info,
                                      environ=req.environ, headers=req.headers)
             source_resp = self.GET(source_req)
+            sink_req.headers['etag'] = source_resp.etag  # XXX can I really get away with this?
 
             # This gives middlewares a way to change the source; for example,
             # this lets you COPY a SLO manifest and have the new object be the
