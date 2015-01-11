@@ -14,12 +14,14 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import logging
+
 from errno import EEXIST
 from itertools import islice, izip
 from operator import itemgetter
 from os import mkdir
 from os.path import basename, abspath, dirname, exists, join as pathjoin
-from sys import argv as sys_argv, exit, stderr
+from sys import argv as sys_argv, exit, stderr, stdout
 from textwrap import wrap
 from time import time
 import optparse
@@ -831,6 +833,8 @@ swift-ring-builder <builder_file> rebalance [options]
                           help='Force a rebalanced ring to save even '
                           'if < 1% of parts changed')
         parser.add_option('-s', '--seed', help="seed to use for rebalance")
+        parser.add_option('-d', '--debug', action='store_true',
+                          help="print debug information")
         options, args = parser.parse_args(argv)
 
         def get_seed(index):
@@ -840,6 +844,14 @@ swift-ring-builder <builder_file> rebalance [options]
                 return args[index]
             except IndexError:
                 pass
+
+        if options.debug:
+            logger = logging.getLogger("swift.ring.builder")
+            logger.setLevel(logging.DEBUG)
+            handler = logging.StreamHandler(stdout)
+            formatter = logging.Formatter("%(levelname)s: %(message)s")
+            handler.setFormatter(formatter)
+            logger.addHandler(handler)
 
         devs_changed = builder.devs_changed
         try:
