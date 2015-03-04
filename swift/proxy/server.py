@@ -383,6 +383,7 @@ class Application(object):
         except HTTPException as error_response:
             return error_response
         except (Exception, Timeout):
+            import q; q.q('done blowed up')
             self.logger.exception(_('ERROR Unhandled exception in request'))
             return HTTPServerError(request=req)
 
