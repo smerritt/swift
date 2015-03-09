@@ -901,11 +901,12 @@ swift-ring-builder <builder_file> rebalance [options]
         status = EXIT_SUCCESS
         if builder.dispersion > 0:
             print '-' * 79
-            print('NOTE: Dispersion of %.06f indicates some parts are not\n'
-                  '      optimally dispersed.\n\n'
-                  '      You may want adjust some device weights, increase\n'
-                  '      the overload or review the dispersion report.' %
-                  builder.dispersion)
+            print(
+                'NOTE: Dispersion of %.06f indicates some parts are not\n'
+                '      optimally dispersed.\n\n'
+                '      You may want to adjust some device weights, increase\n'
+                '      the overload or review the dispersion report.' %
+                builder.dispersion)
             status = EXIT_WARNING
             print '-' * 79
         elif balance > 5 and balance / 100.0 > builder.overload:
