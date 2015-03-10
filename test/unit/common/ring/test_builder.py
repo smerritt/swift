@@ -837,6 +837,56 @@ class TestRingBuilder(unittest.TestCase):
         ref = [0, 17, 16, 16, 14, 15, 13, 13, 12, 12, 14]
         self.assertEqual(ref, moved_partitions)
 
+    def test_unbalanceable_ring_settles_down(self):
+        rb = ring.RingBuilder(12, 3, 1)
+        rb.set_overload(0.05)
+        # Three zones, one smaller than the other two
+        rb.add_dev({'id': 1, 'region': 0, 'zone': 1, 'weight': 100,
+                    'ip': '127.0.0.1', 'port': 10000, 'device': 'sda'})
+        rb.add_dev({'id': 2, 'region': 0, 'zone': 1, 'weight': 100,
+                    'ip': '127.0.0.1', 'port': 10000, 'device': 'sdb'})
+        rb.add_dev({'id': 3, 'region': 0, 'zone': 1, 'weight': 100,
+                    'ip': '127.0.0.1', 'port': 10000, 'device': 'sdc'})
+
+        rb.add_dev({'id': 4, 'region': 0, 'zone': 2, 'weight': 100,
+                    'ip': '127.0.0.1', 'port': 10000, 'device': 'sdd'})
+        rb.add_dev({'id': 5, 'region': 0, 'zone': 2, 'weight': 100,
+                    'ip': '127.0.0.1', 'port': 10000, 'device': 'sde'})
+        rb.add_dev({'id': 6, 'region': 0, 'zone': 2, 'weight': 100,
+                    'ip': '127.0.0.1', 'port': 10000, 'device': 'sdf'})
+
+        rb.add_dev({'id': 7, 'region': 0, 'zone': 3, 'weight': 50,
+                    'ip': '127.0.0.1', 'port': 10000, 'device': 'sdd'})
+        rb.add_dev({'id': 8, 'region': 0, 'zone': 3, 'weight': 50,
+                    'ip': '127.0.0.1', 'port': 10000, 'device': 'sde'})
+        rb.add_dev({'id': 9, 'region': 0, 'zone': 3, 'weight': 50,
+                    'ip': '127.0.0.1', 'port': 10000, 'device': 'sdf'})
+        rb.rebalance()
+
+        # settle it all down
+        rb.pretend_min_part_hours_passed()
+        parts_moved, _junk = rb.rebalance()
+        rebalances = 1
+        while parts_moved > 0 and rebalances < 10:
+            parts_moved, _junk = rb.rebalance()
+            rebalances += 1
+
+        # self.assertEqual(
+        #     parts_moved, 0,
+        #     "Failed to settle down after %d rebalances" % rebalances)
+
+        # now perturb the balance a little
+        rb.set_dev_weight(4, 99)
+        rb.pretend_min_part_hours_passed()
+        parts_moved, _junk = rb.rebalance()
+        # Total weight went from 897 to 896, a roughly 0.1% decrease. Thus, we
+        # should see a roughly 1% partition movement. Anything over about
+        # 2% is too many partitions moved.
+        moved_fraction = float(parts_moved) / rb.parts / rb.replicas
+
+        self.assertTrue(moved_fraction < 0.02,
+                        "Too much movement: %.6f" % moved_fraction)
+
     def test_set_replicas_increase(self):
         rb = ring.RingBuilder(8, 2, 0)
         rb.add_dev({'id': 0, 'region': 0, 'zone': 0, 'weight': 1,

@@ -376,6 +376,7 @@ class RingBuilder(object):
             self.devs_changed = False
             self._build_dispersion_graph()
             return self.parts, self.get_balance()
+        self.logger.debug("Not a new builder; rebalancing as normal")
         changed_parts = 0
         self._update_last_part_moves()
         last_balance = 0
@@ -390,9 +391,11 @@ class RingBuilder(object):
         while True:
             reassign_parts = self._gather_reassign_parts()
             changed_parts += len(reassign_parts)
-            self.logger.debug("Gathered %d parts", changed_parts)
+            self.logger.debug("Gathered %d parts this pass (%d total)",
+                              len(reassign_parts), changed_parts)
             self._reassign_parts(reassign_parts)
-            self.logger.debug("Assigned %d parts", changed_parts)
+            self.logger.debug("Assigned %d parts this pass (%d total)",
+                              len(reassign_parts), changed_parts)
             while self._remove_devs:
                 remove_dev_id = self._remove_devs.pop()['id']
                 self.logger.debug("Removing dev %d", remove_dev_id)
@@ -428,7 +431,7 @@ class RingBuilder(object):
         }
 
         :param old_replica2part2dev: if called from rebalance, the
-            old_replica2part2dev can be used to count moved moved parts.
+            old_replica2part2dev can be used to count moved parts.
 
         :returns: number of parts with different assignments than
             old_replica2part2dev if provided
@@ -762,10 +765,15 @@ class RingBuilder(object):
         """
         wanted_parts_for_tier = {}
         for dev in self._iter_devs():
-            pw = (max(0, dev['parts_wanted']) +
-                  max(int(math.ceil(
-                      (dev['parts_wanted'] + dev['parts']) * self.overload)),
-                      0))
+            # pw = (max(0, dev['parts_wanted']) +
+            #       max(int(math.ceil(
+            #           (dev['parts_wanted'] + dev['parts']) * self.overload)),
+            #           0))
+            pw = max(0,
+                     int(math.ceil((dev['parts'] + dev['parts_wanted'])
+                                   * (1.0 + self.overload)
+                                   - dev['parts'])))
+
             for tier in tiers_for_dev(dev):
                 wanted_parts_for_tier.setdefault(tier, 0)
                 wanted_parts_for_tier[tier] += pw
@@ -782,11 +790,16 @@ class RingBuilder(object):
         tfd = {}
 
         tiers_by_len = defaultdict(set)
+        tier_weight = defaultdict(float)
+        total_weight = 0.0
         for dev in self._iter_devs():
+            dev_weight = dev['weight']
+            total_weight += dev_weight
             tiers = tiers_for_dev(dev)
             tfd[dev['id']] = tiers
             for tier in tiers:
                 tiers_by_len[len(tier)].add(tier)
+                tier_weight[tier] += dev_weight
 
         tiers_by_len = dict((length, list(tiers))
                             for length, tiers in tiers_by_len.items())
@@ -818,6 +831,30 @@ class RingBuilder(object):
         # currently sufficient spread out across the cluster.
         spread_out_parts = defaultdict(list)
         max_allowed_replicas = self._build_max_replicas_by_tier()
+
+        # Push max_allowed_replicas upward to avoid pointless partition
+        # gathering. If you have, say, 3 replicas and 3 unequal-size zones,
+        # then _build_max_replicas_by_tier will tell you that each zone has
+        # a maximum of 1 replica allowed in it, but that's a dirty rotten
+        # lie. The biggest zone is going to wind up with at least 2 replicas
+        # of some partitions. If we don't fudge these upwards, then we'll
+        # end up gathering parts from the big zone (because they have 2
+        # replicas in it), then putting them down right back in the big zone
+        # (because it's the only place with any room).
+        #
+        # We can detect this and compensate for it; if the big zone has 0.40
+        # of the total weight, then it should allow for ceiling(0.4 /
+        # 0.33333) = 2 replicas. Similarly, if things were extremely
+        # unbalanced and the big zone had 0.75 of the total weight, then it
+        # would be allowed to hold up to ceiling(0.75 / 0.3333333) = 3
+        # replicas.
+        replicas = len(self._replica2part2dev)
+        for tier in max_allowed_replicas.keys():
+            tier_weight_fraction = tier_weight[tier] / total_weight
+            adjustment = tier_weight_fraction * replicas
+            max_allowed_replicas[tier] = max(
+                max_allowed_replicas[tier] * adjustment, 1.0)
+
         wanted_parts_for_tier = self._get_available_parts()
         moved_parts = 0
         for part in xrange(self.parts):
@@ -919,7 +956,14 @@ class RingBuilder(object):
                 if part in removed_dev_parts or part in spread_out_parts:
                     continue
                 dev = self.devs[part2dev[part]]
-                if dev['parts_wanted'] < 0:
+                # avail_on_dev = wanted_parts_for_tier[tfd[dev['id']][-1]]
+                # if avail_on_dev < 0:
+                avail_on_dev = int(
+                    (dev['parts'] + dev['parts_wanted'])
+                    * (1.0 + self.overload)
+                    - dev['parts'])
+                # avail_on_dev = dev['parts_wanted']  # XXX
+                if avail_on_dev < 0:
                     self._last_part_moves[part] = 0
                     dev['parts_wanted'] += 1
                     dev['parts'] -= 1
