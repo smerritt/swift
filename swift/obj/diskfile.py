@@ -309,6 +309,8 @@ def hash_suffix(path, reclaim_age):
         if err.errno in (errno.ENOTDIR, errno.ENOENT):
             raise PathNotDir()
         raise
+
+    found_something = False
     for hsh in path_contents:
         hsh_path = join(path, hsh)
         try:
@@ -325,7 +327,9 @@ def hash_suffix(path, reclaim_age):
                                                  'quar_path': quar_path})
                 continue
             raise
-        if not files:
+        if files:
+            found_something = True
+        else:
             try:
                 os.rmdir(hsh_path)
             except OSError:
@@ -336,6 +340,9 @@ def hash_suffix(path, reclaim_age):
         os.rmdir(path)
     except OSError:
         pass
+
+    if not found_something:
+        raise PathNotDir()
     return md5.hexdigest()
 
 
@@ -365,7 +372,7 @@ def invalidate_hash(suffix_dir):
 
 
 def get_hashes(partition_dir, recalculate=None, do_listdir=False,
-               reclaim_age=ONE_WEEK):
+               reclaim_age=ONE_WEEK, hash_suffix_fn=hash_suffix):
     """
     Get a list of hashes for the suffix dir.  do_listdir causes it to mistrust
     the hash cache for suffix existence at the (unexpectedly high) cost of a
@@ -375,6 +382,7 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
     :param recalculate: list of suffixes which should be recalculated when got
     :param do_listdir: force existence check for all hashes in the partition
     :param reclaim_age: age at which to remove tombstones
+    :param hash_suffix_fn: function to hash a suffix dir
 
     :returns: tuple of (number of suffix dirs hashed, dictionary of hashes)
     """
@@ -406,7 +414,7 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
         if not hash_:
             suffix_dir = join(partition_dir, suffix)
             try:
-                hashes[suffix] = hash_suffix(suffix_dir, reclaim_age)
+                hashes[suffix] = hash_suffix_fn(suffix_dir, reclaim_age)
                 hashed += 1
             except PathNotDir:
                 del hashes[suffix]
@@ -421,7 +429,7 @@ def get_hashes(partition_dir, recalculate=None, do_listdir=False,
                     hashes, hashes_file, partition_dir, PICKLE_PROTOCOL)
                 return hashed, hashes
         return get_hashes(partition_dir, recalculate, do_listdir,
-                          reclaim_age)
+                          reclaim_age, hash_suffix_fn)
     else:
         return hashed, hashes
 
@@ -578,6 +586,7 @@ class DiskFileManager(object):
     # module level functions dropped to implementation specific
     hash_cleanup_listdir = strip_self(hash_cleanup_listdir)
     _get_hashes = strip_self(get_hashes)
+    _hash_suffix = strip_self(hash_suffix)
     invalidate_hash = strip_self(invalidate_hash)
     get_ondisk_files = strip_self(get_ondisk_files)
     quarantine_renamer = strip_self(quarantine_renamer)
@@ -756,7 +765,10 @@ class DiskFileManager(object):
                                  partition, account, container, obj,
                                  policy=policy, **kwargs)
 
-    def get_hashes(self, device, partition, suffixes, policy):
+    def get_hashes(self, device, partition, recalculate, policy,
+                   do_listdir=False, reclaim_age=None):
+        if reclaim_age is None:
+            reclaim_age = self.reclaim_age
         dev_path = self.get_dev_path(device)
         if not dev_path:
             raise DiskFileDeviceUnavailable()
@@ -764,9 +776,20 @@ class DiskFileManager(object):
                                       partition)
         if not os.path.exists(partition_path):
             mkdirs(partition_path)
-        _junk, hashes = self.threadpools[device].force_run_in_thread(
-            self._get_hashes, partition_path, recalculate=suffixes)
-        return hashes
+
+        return self.threadpools[device].force_run_in_thread(
+            self.get_part_hashes,
+            partition_path, recalculate,
+            do_listdir=do_listdir, reclaim_age=reclaim_age)
+
+    def get_part_hashes(self, partition_path, recalculate,
+                        do_listdir=False, reclaim_age=None):
+        if reclaim_age is None:
+            reclaim_age = self.reclaim_age
+        return self._get_hashes(
+            partition_path, recalculate=recalculate,
+            do_listdir=do_listdir, reclaim_age=reclaim_age,
+            hash_suffix_fn=self._hash_suffix)
 
     def _listdir(self, path):
         try:
@@ -2292,6 +2315,8 @@ class ECDiskFileManager(DiskFileManager):
             if err.errno in (errno.ENOTDIR, errno.ENOENT):
                 raise PathNotDir()
             raise
+
+        found_something = False
         for hsh in path_contents:
             hsh_path = join(path, hsh)
             try:
@@ -2308,7 +2333,9 @@ class ECDiskFileManager(DiskFileManager):
                                                      'quar_path': quar_path})
                     continue
                 raise
-            if not files:
+            if files:
+                found_something = True
+            else:
                 try:
                     os.rmdir(hsh_path)
                 except OSError:
@@ -2327,60 +2354,10 @@ class ECDiskFileManager(DiskFileManager):
             os.rmdir(path)
         except OSError:
             pass
+
+        if not found_something:
+            raise PathNotDir()
+
         # here we flatten out the hashers hexdigest into a dictionary instead
         # of just returning the one hexdigest for the whole suffix
         return dict((fi, md5.hexdigest()) for fi, md5 in hash_per_fi.items())
-
-    def _get_hashes(self, partition_path, recalculate=None, do_listdir=False,
-                    reclaim_age=None):
-        """
-        The only difference with this method and the module level function
-        get_hashes is the call to hash_suffix routes to a method _hash_suffix
-        on this instance.
-        """
-        reclaim_age = reclaim_age or self.reclaim_age
-        hashed = 0
-        hashes_file = join(partition_path, HASH_FILE)
-        modified = False
-        force_rewrite = False
-        hashes = {}
-        mtime = -1
-
-        if recalculate is None:
-            recalculate = []
-
-        try:
-            with open(hashes_file, 'rb') as fp:
-                hashes = pickle.load(fp)
-            mtime = getmtime(hashes_file)
-        except Exception:
-            do_listdir = True
-            force_rewrite = True
-        if do_listdir:
-            for suff in os.listdir(partition_path):
-                if len(suff) == 3:
-                    hashes.setdefault(suff, None)
-            modified = True
-        hashes.update((suffix, None) for suffix in recalculate)
-        for suffix, hash_ in hashes.items():
-            if not hash_:
-                suffix_dir = join(partition_path, suffix)
-                try:
-                    hashes[suffix] = self._hash_suffix(suffix_dir, reclaim_age)
-                    hashed += 1
-                except PathNotDir:
-                    del hashes[suffix]
-                except OSError:
-                    logging.exception(_('Error hashing suffix'))
-                modified = True
-        if modified:
-            with lock_path(partition_path):
-                if force_rewrite or not exists(hashes_file) or \
-                        getmtime(hashes_file) == mtime:
-                    write_pickle(
-                        hashes, hashes_file, partition_path, PICKLE_PROTOCOL)
-                    return hashed, hashes
-            return self._get_hashes(partition_path, recalculate, do_listdir,
-                                    reclaim_age)
-        else:
-            return hashed, hashes

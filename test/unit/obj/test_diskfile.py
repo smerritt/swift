@@ -4053,7 +4053,7 @@ class TestSuffixHashes(unittest.TestCase):
             df.delete(self.ts())
             suffix_dir = os.path.dirname(df._datadir)
             suffix = os.path.basename(suffix_dir)
-            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [], policy)
             self.assertTrue(suffix in hashes)  # sanity
             # sanity check hashes file
             part_path = os.path.join(self.devices, 'sda1',
@@ -4092,7 +4092,7 @@ class TestSuffixHashes(unittest.TestCase):
             with open(hashes_file) as f:
                 self.assertEqual(f.read(), 'asdf')
             # ... but get_hashes will
-            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [], policy)
             self.assertTrue(suffix in hashes)
 
     # get_hashes tests - hash_suffix behaviors
@@ -4107,7 +4107,7 @@ class TestSuffixHashes(unittest.TestCase):
             timestamp = self.ts()
             df.delete(timestamp)
             tombstone_hash = md5(timestamp.internal + '.ts').hexdigest()
-            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [], policy)
             expected = {
                 REPL_POLICY: {suffix: tombstone_hash},
                 EC_POLICY: {suffix: {
@@ -4121,21 +4121,14 @@ class TestSuffixHashes(unittest.TestCase):
             df_mgr = self.df_router[policy]
             df = df_mgr.get_diskfile(
                 'sda1', '0', 'a', 'c', 'o', policy=policy)
-            suffix = os.path.basename(os.path.dirname(df._datadir))
-            # scale back this tests manager's reclaim age a bit
+            # scale back this test's manager's reclaim age a bit
             df_mgr.reclaim_age = 1000
             # write a tombstone that's just a *little* older
             old_time = time() - 1001
             timestamp = Timestamp(old_time)
             df.delete(timestamp.internal)
-            tombstone_hash = md5(timestamp.internal + '.ts').hexdigest()
-            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
-            expected = {
-                # repl is broken, it doesn't use self.reclaim_age
-                REPL_POLICY: tombstone_hash,
-                EC_POLICY: {},
-            }[policy.policy_type]
-            self.assertEqual(hashes, {suffix: expected})
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [], policy)
+            self.assertEqual(hashes, {})
 
     def test_hash_suffix_one_datafile(self):
         for policy in self.iter_policies():
@@ -4154,7 +4147,7 @@ class TestSuffixHashes(unittest.TestCase):
                     'Content-Length': len(test_data),
                 }
                 writer.put(metadata)
-            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [], policy)
             datafile_hash = md5({
                 EC_POLICY: timestamp.internal,
                 REPL_POLICY: timestamp.internal + '.data',
@@ -4189,7 +4182,7 @@ class TestSuffixHashes(unittest.TestCase):
                     open(os.path.join(df._datadir, filename), 'w').close()
             tombstone_hash = md5(filename).hexdigest()
             # call get_hashes and it should clean things up
-            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [], policy)
             expected = {
                 REPL_POLICY: {suffix: tombstone_hash},
                 EC_POLICY: {suffix: {
@@ -4225,7 +4218,7 @@ class TestSuffixHashes(unittest.TestCase):
                     filename += suff
                     open(os.path.join(df._datadir, filename), 'w').close()
             # call get_hashes and it should clean things up
-            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [], policy)
             data_filename = timestamp.internal
             if policy.policy_type == EC_POLICY:
                 data_filename += '#%s' % df._frag_index
@@ -4291,7 +4284,7 @@ class TestSuffixHashes(unittest.TestCase):
             for hsh_path in empty_hsh_paths:
                 self.assertTrue(os.path.exists(hsh_path))  # sanity
             # get_hashes will cleanup empty hsh_path and leave valid one
-            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [], policy)
             self.assertTrue(suffix in hashes)
             self.assertTrue(os.path.exists(df._datadir))
             for hsh_path in empty_hsh_paths:
@@ -4308,20 +4301,17 @@ class TestSuffixHashes(unittest.TestCase):
                                        suffix)
             os.makedirs(suffix_path)
             self.assertTrue(os.path.exists(suffix_path))  # sanity
-            hashes = df_mgr.get_hashes('sda1', '0', [suffix], policy)
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [suffix], policy)
             # suffix dir cleaned up by get_hashes
             self.assertFalse(os.path.exists(suffix_path))
-            expected = {
-                EC_POLICY: {'123': {}},
-                REPL_POLICY: {'123': EMPTY_ETAG},
-            }[policy.policy_type]
+            expected = {}
             msg = 'expected %r != %r for policy %r' % (expected, hashes,
                                                        policy)
             self.assertEqual(hashes, expected, msg)
 
             # now make the suffix path a file
             open(suffix_path, 'w').close()
-            hashes = df_mgr.get_hashes('sda1', '0', [suffix], policy)
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [suffix], policy)
             expected = {}
             msg = 'expected %r != %r for policy %r' % (expected, hashes,
                                                        policy)
@@ -4370,13 +4360,9 @@ class TestSuffixHashes(unittest.TestCase):
             # make the df hash path a file
             open(df._datadir, 'wb').close()
             df_mgr = self.df_router[policy]
-            hashes = df_mgr.get_hashes(self.existing_device, '0', [suffix],
-                                       policy)
-            expected = {
-                REPL_POLICY: {suffix: EMPTY_ETAG},
-                EC_POLICY: {suffix: {}},
-            }[policy.policy_type]
-            self.assertEqual(hashes, expected)
+            _junk, hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [suffix], policy)
+            self.assertEqual(hashes, {})
             # and hash path is quarantined
             self.assertFalse(os.path.exists(df._datadir))
             # each device a quarantined directory
@@ -4426,8 +4412,8 @@ class TestSuffixHashes(unittest.TestCase):
                 return orig_os_listdir(path)
 
             with mock.patch('os.listdir', mock_os_listdir):
-                hashes = df_mgr.get_hashes(self.existing_device, '0', [],
-                                           policy)
+                _junk, hashes = df_mgr.get_hashes(
+                    self.existing_device, '0', [], policy)
 
             self.assertEqual(listdir_calls, [
                 part_path,
@@ -4446,15 +4432,11 @@ class TestSuffixHashes(unittest.TestCase):
             df = df_mgr.get_diskfile(self.existing_device, '0', 'a', 'c',
                                      'o', policy=policy)
             os.makedirs(df._datadir)
-            suffix = os.path.basename(os.path.dirname(df._datadir))
             with mock.patch('os.rmdir', side_effect=OSError()):
-                hashes = df_mgr.get_hashes(self.existing_device, '0', [],
-                                           policy)
-            expected = {
-                EC_POLICY: {},
-                REPL_POLICY: md5().hexdigest(),
-            }[policy.policy_type]
-            self.assertEqual(hashes, {suffix: expected})
+                _junk, hashes = df_mgr.get_hashes(
+                    self.existing_device, '0', [], policy)
+
+            self.assertEqual(hashes, {})
             self.assertTrue(os.path.exists(df._datadir))
 
     def test_hash_suffix_rmdir_suffix_oserror(self):
@@ -4465,7 +4447,6 @@ class TestSuffixHashes(unittest.TestCase):
                                      'o', policy=policy)
             os.makedirs(df._datadir)
             suffix_path = os.path.dirname(df._datadir)
-            suffix = os.path.basename(suffix_path)
 
             captured_paths = []
 
@@ -4475,13 +4456,9 @@ class TestSuffixHashes(unittest.TestCase):
                     raise OSError('kaboom!')
 
             with mock.patch('os.rmdir', mock_rmdir):
-                hashes = df_mgr.get_hashes(self.existing_device, '0', [],
-                                           policy)
-            expected = {
-                EC_POLICY: {},
-                REPL_POLICY: md5().hexdigest(),
-            }[policy.policy_type]
-            self.assertEqual(hashes, {suffix: expected})
+                _junk, hashes = df_mgr.get_hashes(
+                    self.existing_device, '0', [], policy)
+            self.assertEqual(hashes, {})
             self.assertTrue(os.path.exists(suffix_path))
             self.assertEqual([
                 df._datadir,
@@ -4493,8 +4470,8 @@ class TestSuffixHashes(unittest.TestCase):
     def test_get_hashes_creates_partition_and_pkl(self):
         for policy in self.iter_policies():
             df_mgr = self.df_router[policy]
-            hashes = df_mgr.get_hashes(self.existing_device, '0', [],
-                                       policy)
+            _junk, hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [], policy)
             self.assertEqual(hashes, {})
             part_path = os.path.join(
                 self.devices, 'sda1', diskfile.get_data_dir(policy), '0')
@@ -4504,8 +4481,8 @@ class TestSuffixHashes(unittest.TestCase):
             self.assertTrue(os.path.exists(hashes_file))
 
             # and double check the hashes
-            new_hashes = df_mgr.get_hashes(self.existing_device, '0', [],
-                                           policy)
+            _junk, new_hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [], policy)
             self.assertEqual(hashes, new_hashes)
 
     def test_get_hashes_new_pkl_finds_new_suffix_dirs(self):
@@ -4524,7 +4501,8 @@ class TestSuffixHashes(unittest.TestCase):
             suffix = os.path.basename(os.path.dirname(df._datadir))
             # get_hashes will find the untracked suffix dir
             self.assertFalse(os.path.exists(hashes_file))  # sanity
-            hashes = df_mgr.get_hashes(self.existing_device, '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [], policy)
             self.assertTrue(suffix in hashes)
             # ... and create a hashes pickle for it
             self.assertTrue(os.path.exists(hashes_file))
@@ -4537,7 +4515,8 @@ class TestSuffixHashes(unittest.TestCase):
                 self.devices, 'sda1', diskfile.get_data_dir(policy), '0')
             hashes_file = os.path.join(part_path,
                                        diskfile.HASH_FILE)
-            hashes = df_mgr.get_hashes(self.existing_device, '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [], policy)
             self.assertEqual(hashes, {})
             self.assertTrue(os.path.exists(hashes_file))  # sanity
             # add something to find
@@ -4549,12 +4528,12 @@ class TestSuffixHashes(unittest.TestCase):
             suffix = os.path.basename(os.path.dirname(df._datadir))
             # but get_hashes has no reason to find it (because we didn't
             # call invalidate_hash)
-            new_hashes = df_mgr.get_hashes(self.existing_device, '0', [],
-                                           policy)
+            _junk, new_hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [], policy)
             self.assertEqual(new_hashes, hashes)
             # ... unless remote end asks for a recalc
-            hashes = df_mgr.get_hashes(self.existing_device, '0', [suffix],
-                                       policy)
+            _junk, hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [suffix], policy)
             self.assertTrue(suffix in hashes)
 
     def test_get_hashes_does_not_rehash_known_suffix_dirs(self):
@@ -4566,30 +4545,27 @@ class TestSuffixHashes(unittest.TestCase):
             timestamp = self.ts()
             df.delete(timestamp)
             # create the baseline hashes file
-            hashes = df_mgr.get_hashes(self.existing_device, '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [], policy)
             self.assertTrue(suffix in hashes)
             # now change the contents of the suffix w/o calling
             # invalidate_hash
             rmtree(df._datadir)
             suffix_path = os.path.dirname(df._datadir)
             self.assertTrue(os.path.exists(suffix_path))  # sanity
-            new_hashes = df_mgr.get_hashes(self.existing_device, '0', [],
-                                           policy)
+            _junk, new_hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [], policy)
             # ... and get_hashes is none the wiser
             self.assertEqual(new_hashes, hashes)
 
             # ... unless remote end asks for a recalc
-            hashes = df_mgr.get_hashes(self.existing_device, '0', [suffix],
-                                       policy)
+            _junk, hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [suffix], policy)
             self.assertNotEqual(new_hashes, hashes)
             # and the empty suffix path is removed
             self.assertFalse(os.path.exists(suffix_path))
-            # ... but is hashed as "empty"
-            expected = {
-                EC_POLICY: {},
-                REPL_POLICY: md5().hexdigest(),
-            }[policy.policy_type]
-            self.assertEqual({suffix: expected}, hashes)
+            # so it doesn't show up in hashes.pkl
+            self.assertEqual({}, hashes)
 
     def test_get_hashes_multi_file_multi_suffix(self):
         paths, suffix = find_paths_with_matching_suffixes(needed_matches=2,
@@ -4711,7 +4687,7 @@ class TestSuffixHashes(unittest.TestCase):
                 }
             else:
                 self.fail('unknown policy type %r' % policy.policy_type)
-            hashes = df_mgr.get_hashes('sda1', '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes('sda1', '0', [], policy)
             self.assertEqual(hashes, expected)
 
     # get_hashes tests - error handling
@@ -4735,8 +4711,8 @@ class TestSuffixHashes(unittest.TestCase):
             os.makedirs(part_path)
             # create a pre-existing zero-byte file
             open(os.path.join(part_path, diskfile.HASH_FILE), 'w').close()
-            hashes = df_mgr.get_hashes(self.existing_device, '0', [],
-                                       policy)
+            _junk, hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [], policy)
             self.assertEqual(hashes, {})
 
     def test_get_hashes_hash_suffix_enotdir(self):
@@ -4751,7 +4727,8 @@ class TestSuffixHashes(unittest.TestCase):
             part_dir = os.path.join(self.devices, self.existing_device,
                                     diskfile.get_data_dir(policy), '0')
             open(os.path.join(part_dir, 'bad'), 'w').close()
-            hashes = df_mgr.get_hashes(self.existing_device, '0', [], policy)
+            _junk, hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [], policy)
             self.assertTrue(suffix in hashes)
             self.assertFalse('bad' in hashes)
 
@@ -4764,12 +4741,9 @@ class TestSuffixHashes(unittest.TestCase):
                                        suffix)
             os.makedirs(suffix_path)
             self.assertTrue(os.path.exists(suffix_path))  # sanity
-            hashes = df_mgr.get_hashes(self.existing_device, '0', [suffix],
-                                       policy)
-            expected = {
-                EC_POLICY: {'123': {}},
-                REPL_POLICY: {'123': EMPTY_ETAG},
-            }[policy.policy_type]
+            _junk, hashes = df_mgr.get_hashes(
+                self.existing_device, '0', [suffix], policy)
+            expected = {}
             msg = 'expected %r != %r for policy %r' % (expected, hashes,
                                                        policy)
             self.assertEqual(hashes, expected, msg)
@@ -4780,7 +4754,8 @@ class TestSuffixHashes(unittest.TestCase):
                 side_effect=OSError(errno.EACCES, os.strerror(errno.EACCES)))
             with mock.patch("os.listdir", mocked_os_listdir):
                 with mock.patch('swift.obj.diskfile.logging') as mock_logging:
-                    hashes = df_mgr.get_hashes('sda1', '0', [suffix], policy)
+                    _junk, hashes = df_mgr.get_hashes(
+                        'sda1', '0', [suffix], policy)
             self.assertEqual(mock_logging.method_calls,
                              [mock.call.exception('Error hashing suffix')])
             # recalc always causes a suffix to get reset to None; the listdir

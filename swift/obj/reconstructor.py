@@ -395,7 +395,7 @@ class ObjectReconstructor(Daemon):
     def _get_hashes(self, policy, path, recalculate=None, do_listdir=False):
         df_mgr = self._df_router[policy]
         hashed, suffix_hashes = tpool_reraise(
-            df_mgr._get_hashes, path, recalculate=recalculate,
+            df_mgr.get_part_hashes, path, recalculate=recalculate,
             do_listdir=do_listdir, reclaim_age=self.reclaim_age)
         self.logger.update_stats('suffix.hashes', hashed)
         return suffix_hashes

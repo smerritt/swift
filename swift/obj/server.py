@@ -869,7 +869,7 @@ class ObjectController(BaseStorageServer):
             get_name_and_placement(request, 2, 3, True)
         suffixes = suffix_parts.split('-') if suffix_parts else []
         try:
-            hashes = self._diskfile_router[policy].get_hashes(
+            _junk, hashes = self._diskfile_router[policy].get_hashes(
                 device, partition, suffixes, policy)
         except DiskFileDeviceUnavailable:
             resp = HTTPInsufficientStorage(drive=device, request=request)
