@@ -20,6 +20,9 @@ import socket
 from swift.common.utils import expand_ipv6
 
 
+MAX_TIER_LENGTH = 4
+
+
 def tiers_for_dev(dev):
     """
     Returns a tuple of tiers for a given device in ascending order by
@@ -32,6 +35,8 @@ def tiers_for_dev(dev):
     t3 = dev['ip']
     t4 = dev['id']
 
+    # Note: if you change this, be sure to update MAX_TIER_LENGTH
+    # appropriately.
     return ((t1,),
             (t1, t2),
             (t1, t2, t3),

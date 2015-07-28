@@ -31,7 +31,7 @@ from time import time
 from swift.common import exceptions
 from swift.common.ring import RingData
 from swift.common.ring.utils import tiers_for_dev, build_tier_tree, \
-    validate_and_normalize_address
+    validate_and_normalize_address, MAX_TIER_LENGTH
 
 MAX_BALANCE = 999.99
 
@@ -1148,10 +1148,36 @@ class RingBuilder(object):
                                replicas_to_replace may be shared for multiple
                                partitions, so be sure you do not modify it.
         """
+
+        # Each tier has a sort key, which indicates how good a spot it is
+        # for placing a partition. Bigger is better; all other things being
+        # equal, the tier with the biggest sort key gets the partition.
+        #
+        # A sort key consists of 3 parts:
+        #
+        #   [0]: the sum of parts_wanted in that tier. For a device, this is
+        #        simply dev['parts_wanted']; for a higher tier, it is the
+        #        sum of lower tiers' parts_wanted value.
+        #
+        #   [1]: a random number to be used as a tiebreaker when two tiers
+        #        want the same number of parts.
+        #
+        #   [2]: a unique number to be used as a fallback tiebreaker when
+        #        two tiers share the same parts_wanted *and* random
+        #        tiebreaker number.
+        def default_sort_key():
+            ar = [0, random.randint(0, 0xFFFF)]
+            ar.append(id(ar))
+            return ar
+
+        tier2sort_key = defaultdict(default_sort_key)
+
+        # This contains the number of parts that a tier will take even
+        # accounting for overload (think "fudge factor"). If overload is 0,
+        # then fudge_available_in_tier[t] == tier2sort_key[t][0] for all t.
         fudge_available_in_tier = defaultdict(int)
-        parts_available_in_tier = defaultdict(int)
+
         for dev in self._iter_devs():
-            dev['sort_key'] = self._sort_key_for(dev)
             tiers = tiers_for_dev(dev)
             dev['tiers'] = tiers
             # Note: this represents how many partitions may be assigned to a
@@ -1161,38 +1187,31 @@ class RingBuilder(object):
             # If we did not do this, we could have a zone where, at some
             # point during assignment, number-of-parts-to-gain equals
             # number-of-parts-to-shed. At that point, no further placement
-            # into that zone would occur since its parts_available_in_tier
-            # would be 0. This would happen any time a zone had any device
-            # with partitions to shed, which is any time a device is being
+            # into that zone would occur since its total parts wanted would
+            # be 0. This would happen any time a zone had any device with
+            # partitions to shed, which is any time a device is being
             # removed, which is a pretty frequent operation.
             wanted = max(dev['parts_wanted'], 0)
             fudge = self._n_overload_parts(dev)
             for tier in tiers:
                 fudge_available_in_tier[tier] += (wanted + fudge)
-                parts_available_in_tier[tier] += wanted
+                tier2sort_key[tier][0] += wanted
 
         available_devs = \
             sorted((d for d in self._iter_devs() if d['weight']),
-                   key=lambda x: x['sort_key'])
+                   key=lambda x: tier2sort_key[x['tiers'][-1]])
 
         tier2devs = defaultdict(list)
-        tier2sort_key = defaultdict(tuple)
-        tier2dev_sort_key = defaultdict(list)
-        max_tier_depth = 0
         for dev in available_devs:
             for tier in dev['tiers']:
-                tier2devs[tier].append(dev)  # <-- starts out sorted!
-                tier2dev_sort_key[tier].append(dev['sort_key'])
-                tier2sort_key[tier] = dev['sort_key']
-                if len(tier) > max_tier_depth:
-                    max_tier_depth = len(tier)
+                tier2devs[tier].append(dev)
 
         tier2children_sets = build_tier_tree(available_devs)
         tier2children = defaultdict(list)
         tier2children_sort_key = {}
         tiers_list = [()]
         depth = 1
-        while depth <= max_tier_depth:
+        while depth <= MAX_TIER_LENGTH:
             new_tiers_list = []
             for tier in tiers_list:
                 child_tiers = list(tier2children_sets[tier])
@@ -1203,6 +1222,8 @@ class RingBuilder(object):
                 new_tiers_list.extend(child_tiers)
             tiers_list = new_tiers_list
             depth += 1
+
+        max_allowed_replicas = self._build_tier_capacity()
 
         for part, replace_replicas in reassign_parts:
             # Gather up what other tiers (regions, zones, ip/ports, and
@@ -1220,14 +1241,11 @@ class RingBuilder(object):
                 # Find a new home for this replica
                 tier = ()
                 depth = 1
-                while depth <= max_tier_depth:
+                while depth <= MAX_TIER_LENGTH:
                     roomiest_tier = fudgiest_tier = None
-                    # Order the tiers by how many replicas of this
-                    # partition they already have. Then, of the ones
-                    # with the smallest number of replicas and that have
-                    # room to accept more partitions, pick the tier with
-                    # the hungriest drive and then continue searching in
-                    # that subtree.
+                    # Find the child tiers with capability to accept at
+                    # least one more replica. Of those, pick the one with
+                    # the hungriest drive and continue the search therein.
                     #
                     # There are other strategies we could use here,
                     # such as hungriest-tier (i.e. biggest
@@ -1257,37 +1275,31 @@ class RingBuilder(object):
                     # find one with the smallest possible number of
                     # replicas already in it, breaking ties by which one
                     # has the hungriest drive.
+                    can_take_another_replica = [
+                        t for t in tier2children[tier]
+                        if max_allowed_replicas[t] > other_replicas[t]]
+
+                    if not can_take_another_replica:
+                        raise ZeroDivisionError("ring too small")
+
                     candidates_with_room = [
-                        t for t in tier2children[tier]
-                        if parts_available_in_tier[t] > 0]
-                    candidates_with_fudge = set([
-                        t for t in tier2children[tier]
-                        if fudge_available_in_tier[t] > 0])
-                    candidates_with_fudge.update(candidates_with_room)
+                        t for t in can_take_another_replica
+                        if tier2sort_key[t][0] > 0]
+                    # candidates_with_fudge = set([
+                    #     t for t in can_take_another_replica
+                    #     if fudge_available_in_tier[t] > 0])
+                    # candidates_with_fudge.update(candidates_with_room)
 
                     if candidates_with_room:
-                        if len(candidates_with_room) > \
-                           len(candidates_with_replicas):
-                            # There exists at least one tier with room for
-                            # another partition and 0 other replicas already
-                            # in it, so we can use a faster search. The else
-                            # branch's search would work here, but it's
-                            # significantly slower.
-                            roomiest_tier = max(
-                                (t for t in candidates_with_room
-                                 if other_replicas[t] == 0),
-                                key=tier2sort_key.__getitem__)
-                        else:
-                            roomiest_tier = max(
-                                candidates_with_room,
-                                key=lambda t: (-other_replicas[t],
-                                               tier2sort_key[t]))
+                        roomiest_tier = max(
+                            candidates_with_room,
+                            key=tier2sort_key.__getitem__)
                     else:
                         roomiest_tier = None
 
-                    fudgiest_tier = max(candidates_with_fudge,
-                                        key=lambda t: (-other_replicas[t],
-                                                       tier2sort_key[t]))
+                    fudgiest_tier = max(
+                        can_take_another_replica,
+                        key=tier2sort_key.__getitem__)
 
                     if (roomiest_tier is None or
                         (other_replicas[roomiest_tier] >
@@ -1297,44 +1309,21 @@ class RingBuilder(object):
                         tier = roomiest_tier
                     depth += 1
 
-                dev = tier2devs[tier][-1]
+                # The lowest tier is the device. If we somehow wound up
+                # finding a device tier that has more than one device in it,
+                # something has gone horribly wrong.
+                assert len(tier2devs[tier]) == 1, \
+                    "found %d too many devices in tier %r" % (
+                        len(tier2devs[tier], tier))
+
+                dev = tier2devs[tier][0]
                 dev['parts_wanted'] -= 1
                 dev['parts'] += 1
-                old_sort_key = dev['sort_key']
-                new_sort_key = dev['sort_key'] = self._sort_key_for(dev)
                 for tier in dev['tiers']:
-                    parts_available_in_tier[tier] -= 1
+                    tier2sort_key[tier][0] -= 1
                     fudge_available_in_tier[tier] -= 1
                     other_replicas[tier] += 1
                     occupied_tiers_by_tier_len[len(tier)].add(tier)
-
-                    index = bisect.bisect_left(tier2dev_sort_key[tier],
-                                               old_sort_key)
-                    tier2devs[tier].pop(index)
-                    tier2dev_sort_key[tier].pop(index)
-
-                    new_index = bisect.bisect_left(tier2dev_sort_key[tier],
-                                                   new_sort_key)
-                    tier2devs[tier].insert(new_index, dev)
-                    tier2dev_sort_key[tier].insert(new_index, new_sort_key)
-
-                    new_last_sort_key = tier2dev_sort_key[tier][-1]
-                    tier2sort_key[tier] = new_last_sort_key
-
-                    # Now jiggle tier2children values to keep them sorted
-                    parent_tier = tier[0:-1]
-                    index = bisect.bisect_left(
-                        tier2children_sort_key[parent_tier],
-                        old_sort_key)
-                    popped = tier2children[parent_tier].pop(index)
-                    tier2children_sort_key[parent_tier].pop(index)
-
-                    new_index = bisect.bisect_left(
-                        tier2children_sort_key[parent_tier],
-                        new_last_sort_key)
-                    tier2children[parent_tier].insert(new_index, popped)
-                    tier2children_sort_key[parent_tier].insert(
-                        new_index, new_last_sort_key)
 
                 self._replica2part2dev[replica][part] = dev['id']
                 self.logger.debug(
@@ -1342,12 +1331,84 @@ class RingBuilder(object):
 
         # Just to save memory and keep from accidental reuse.
         for dev in self._iter_devs():
-            del dev['sort_key']
             del dev['tiers']
 
-    @staticmethod
-    def _sort_key_for(dev):
-        return (dev['parts_wanted'], random.randint(0, 0xFFFF), dev['id'])
+    def _build_tier_capacity(self):
+        # max replicas including overload and stuff
+        #
+        # TODO: real docstring
+        all_tiers = set()
+        tier_weight = defaultdict(float)
+        total_weight = 0.0
+        tier2children = defaultdict(set)
+        for dev in self._iter_devs():
+            dev_weight = dev['weight']
+            if dev_weight == 0:
+                continue
+
+            total_weight += dev_weight
+            for tier in tiers_for_dev(dev):
+                tier_weight[tier] += dev_weight
+                tier2children[tier[:-1]].add(tier)
+                all_tiers.add(tier)
+        tier_weight[()] = total_weight
+        all_tiers.add(())
+
+        def walk_tier_tree(tier, replica_count):
+            max_repl = {tier: replica_count}
+            if tier in tier2children:
+                for child_tier in tier2children[tier]:
+                    # This evenly divides the replicas among all the small
+                    # child tiers and then scales it up by overload.
+                    #
+                    # Example 1: Given 5 replicas and 2 equal-weight
+                    # child tiers, this will allow 3 replicas in each.
+                    #
+                    # Example 2: Given 3 replicas and 4 child tiers
+                    # with weight fractions 40%, 20%, 20%, aand 20%,
+                    # this will give 2 replicas to the big (40%) child
+                    # tier and 1 to each of the smaller child tiers.
+                    #
+                    # Example 3: Given 3 replicas, overload=0.5, and 4 child
+                    # tiers with weight fractions 40%, 20%, 20%, aand 20%,
+                    # this will give 3 replicas to the big (40%) child tier
+                    # and 2 to each of the smaller child tiers. This is more
+                    # than any of them will actually *receive*, but that's
+                    # what they're willing to accept.
+                    child_max = math.ceil(
+                        ((tier_weight[child_tier]
+                          * (1 + self._effective_overload)
+                          / tier_weight[tier])
+                        * replica_count))
+                    child_max = min(child_max, replica_count)
+                    max_repl.update(walk_tier_tree(child_tier, child_max))
+            return max_repl
+
+        tier_max_replicas = walk_tier_tree((), self.replicas)
+
+        # Now tier_max_replicas holds what you'd get if you divided up
+        # replicas at each level of the tier tree. However, in cases of very
+        # high overload, this can result in allowing more than one replica
+        # on a given disk. This is terrible and we must not do it.
+        #
+        # Instead, we make sure each disk has at most 1 replica allowed, and
+        # each non-disk tier has at most as many replicas as it has disks.
+        tiers_by_length = sorted(all_tiers, key=len, reverse=True)
+        disk_tiers = set()
+        non_disk_tiers = set()
+
+        disk_tier_length = len(tiers_by_length[0])
+        for tier in tiers_by_length:
+            if len(tier) == disk_tier_length:
+                # a disk gets at most 1 replica
+                tier_max_replicas[tier] = 1
+            else:
+                max_repl_by_disks = sum(
+                    tier_max_replicas[ct] for ct in tier2children[tier])
+                tier_max_replicas[tier] = min(max_repl_by_disks,
+                                              tier_max_replicas[tier])
+
+        return tier_max_replicas
 
     def _build_max_replicas_by_tier(self):
         """
