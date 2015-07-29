@@ -63,6 +63,8 @@ class RingBuilder(object):
     """
 
     def __init__(self, part_power, replicas, min_part_hours):
+        self.fucked = False
+
         if part_power > 32:
             raise ValueError("part_power must be at most 32 (was %d)"
                              % (part_power,))
@@ -1224,6 +1226,10 @@ class RingBuilder(object):
             depth += 1
 
         max_allowed_replicas = self._build_tier_capacity()
+
+        if self.fucked:
+            import pdb; pdb.set_trace()  ### XXXXXXXXXXXXXXXXXXXXXXXX
+            
 
         for part, replace_replicas in reassign_parts:
             # Gather up what other tiers (regions, zones, ip/ports, and
