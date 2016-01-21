@@ -99,11 +99,13 @@ class TestContainerQuotas(unittest.TestCase):
         app = container_quotas.ContainerQuotaMiddleware(FakeApp(), {})
         cache = FakeCache({'bytes': 0, 'meta': {'quota-bytes': '2'}})
 
-        req = Request.blank('/v1/a/c/o',
-                            environ={'REQUEST_METHOD': 'PUT',
-                                     'swift.object/a/c2/o2': {'length': 10},
-                                     'swift.cache': cache},
-                            headers={'x-copy-from': '/c2/o2'})
+        req = Request.blank(
+            '/v1/a/c/o',
+            environ={'REQUEST_METHOD': 'PUT',
+                     'swift.infocache': {
+                         'swift.object/a/c2/o2': {'length': 10}},
+                     'swift.cache': cache},
+            headers={'x-copy-from': '/c2/o2'})
         res = req.get_response(app)
         self.assertEqual(res.status_int, 413)
         self.assertEqual(res.body, 'Upload exceeds quota.')
@@ -112,11 +114,13 @@ class TestContainerQuotas(unittest.TestCase):
         app = container_quotas.ContainerQuotaMiddleware(FakeApp(), {})
         cache = FakeCache({'bytes': 0, 'meta': {'quota-bytes': '2'}})
 
-        req = Request.blank('/v1/a/c2/o2',
-                            environ={'REQUEST_METHOD': 'COPY',
-                                     'swift.object/a/c2/o2': {'length': 10},
-                                     'swift.cache': cache},
-                            headers={'Destination': '/c/o'})
+        req = Request.blank(
+            '/v1/a/c2/o2',
+            environ={'REQUEST_METHOD': 'COPY',
+                     'swift.infocache': {
+                         'swift.object/a/c2/o2': {'length': 10}},
+                     'swift.cache': cache},
+            headers={'Destination': '/c/o'})
         res = req.get_response(app)
         self.assertEqual(res.status_int, 413)
         self.assertEqual(res.body, 'Upload exceeds quota.')
@@ -134,33 +138,39 @@ class TestContainerQuotas(unittest.TestCase):
     def test_not_exceed_bytes_quota_copy_from(self):
         app = container_quotas.ContainerQuotaMiddleware(FakeApp(), {})
         cache = FakeCache({'bytes': 0, 'meta': {'quota-bytes': '100'}})
-        req = Request.blank('/v1/a/c/o',
-                            environ={'REQUEST_METHOD': 'PUT',
-                                     'swift.object/a/c2/o2': {'length': 10},
-                                     'swift.cache': cache},
-                            headers={'x-copy-from': '/c2/o2'})
+        req = Request.blank(
+            '/v1/a/c/o',
+            environ={'REQUEST_METHOD': 'PUT',
+                     'swift.infocache': {
+                         'swift.object/a/c2/o2': {'length': 10}},
+                     'swift.cache': cache},
+            headers={'x-copy-from': '/c2/o2'})
         res = req.get_response(app)
         self.assertEqual(res.status_int, 200)
 
     def test_not_exceed_bytes_quota_copy_verb(self):
         app = container_quotas.ContainerQuotaMiddleware(FakeApp(), {})
         cache = FakeCache({'bytes': 0, 'meta': {'quota-bytes': '100'}})
-        req = Request.blank('/v1/a/c2/o2',
-                            environ={'REQUEST_METHOD': 'COPY',
-                                     'swift.object/a/c2/o2': {'length': 10},
-                                     'swift.cache': cache},
-                            headers={'Destination': '/c/o'})
+        req = Request.blank(
+            '/v1/a/c2/o2',
+            environ={'REQUEST_METHOD': 'COPY',
+                     'swift.infocache': {
+                         'swift.object/a/c2/o2': {'length': 10}},
+                     'swift.cache': cache},
+            headers={'Destination': '/c/o'})
         res = req.get_response(app)
         self.assertEqual(res.status_int, 200)
 
     def test_bytes_quota_copy_from_no_src(self):
         app = container_quotas.ContainerQuotaMiddleware(FakeApp(), {})
         cache = FakeCache({'bytes': 0, 'meta': {'quota-bytes': '100'}})
-        req = Request.blank('/v1/a/c/o',
-                            environ={'REQUEST_METHOD': 'PUT',
-                                     'swift.object/a/c2/o2': {'length': 10},
-                                     'swift.cache': cache},
-                            headers={'x-copy-from': '/c2/o3'})
+        req = Request.blank(
+            '/v1/a/c/o',
+            environ={'REQUEST_METHOD': 'PUT',
+                     'swift.infocache': {
+                         'swift.object/a/c2/o2': {'length': 10}},
+                     'swift.cache': cache},
+            headers={'x-copy-from': '/c2/o3'})
         res = req.get_response(app)
         self.assertEqual(res.status_int, 200)
 
@@ -177,11 +187,13 @@ class TestContainerQuotas(unittest.TestCase):
     def test_bytes_quota_copy_verb_no_src(self):
         app = container_quotas.ContainerQuotaMiddleware(FakeApp(), {})
         cache = FakeCache({'bytes': 0, 'meta': {'quota-bytes': '100'}})
-        req = Request.blank('/v1/a/c2/o3',
-                            environ={'REQUEST_METHOD': 'COPY',
-                                     'swift.object/a/c2/o2': {'length': 10},
-                                     'swift.cache': cache},
-                            headers={'Destination': '/c/o'})
+        req = Request.blank(
+            '/v1/a/c2/o3',
+            environ={'REQUEST_METHOD': 'COPY',
+                     'swift.infocache': {
+                         'swift.object/a/c2/o2': {'length': 10}},
+                     'swift.cache': cache},
+            headers={'Destination': '/c/o'})
         res = req.get_response(app)
         self.assertEqual(res.status_int, 200)
 
@@ -199,11 +211,13 @@ class TestContainerQuotas(unittest.TestCase):
     def test_exceed_counts_quota_copy_from(self):
         app = container_quotas.ContainerQuotaMiddleware(FakeApp(), {})
         cache = FakeCache({'object_count': 1, 'meta': {'quota-count': '1'}})
-        req = Request.blank('/v1/a/c/o',
-                            environ={'REQUEST_METHOD': 'PUT',
-                                     'swift.object/a/c2/o2': {'length': 10},
-                                     'swift.cache': cache},
-                            headers={'x-copy-from': '/c2/o2'})
+        req = Request.blank(
+            '/v1/a/c/o',
+            environ={'REQUEST_METHOD': 'PUT',
+                     'swift.infocache': {
+                         'swift.object/a/c2/o2': {'length': 10}},
+                     'swift.cache': cache},
+            headers={'x-copy-from': '/c2/o2'})
         res = req.get_response(app)
         self.assertEqual(res.status_int, 413)
         self.assertEqual(res.body, 'Upload exceeds quota.')
@@ -225,12 +239,13 @@ class TestContainerQuotas(unittest.TestCase):
                      'status': 200, 'object_count': 1}
         a2_c_cache = {'storage_policy': '0', 'meta': {'quota-count': '1'},
                       'status': 200, 'object_count': 1}
-        req = Request.blank('/v1/a/c2/o2',
-                            environ={'REQUEST_METHOD': 'COPY',
-                                     'swift.container/a/c': a_c_cache,
-                                     'swift.container/a2/c': a2_c_cache},
-                            headers={'Destination': '/c/o',
-                                     'Destination-Account': 'a2'})
+        req = Request.blank(
+            '/v1/a/c2/o2',
+            environ={'REQUEST_METHOD': 'COPY',
+                     'swift.infocache': {'swift.container/a/c': a_c_cache,
+                                         'swift.container/a2/c': a2_c_cache}},
+            headers={'Destination': '/c/o',
+                     'Destination-Account': 'a2'})
         res = req.get_response(app)
         self.assertEqual(res.status_int, 413)
         self.assertEqual(res.body, 'Upload exceeds quota.')
@@ -241,12 +256,13 @@ class TestContainerQuotas(unittest.TestCase):
                      'status': 200, 'object_count': 1}
         a2_c_cache = {'storage_policy': '0', 'meta': {'quota-count': '1'},
                       'status': 200, 'object_count': 1}
-        req = Request.blank('/v1/a2/c/o',
-                            environ={'REQUEST_METHOD': 'PUT',
-                                     'swift.container/a/c': a_c_cache,
-                                     'swift.container/a2/c': a2_c_cache},
-                            headers={'X-Copy-From': '/c2/o2',
-                                     'X-Copy-From-Account': 'a'})
+        req = Request.blank(
+            '/v1/a2/c/o',
+            environ={'REQUEST_METHOD': 'PUT',
+                     'swift.infocache': {'swift.container/a/c': a_c_cache,
+                                         'swift.container/a2/c': a2_c_cache}},
+            headers={'X-Copy-From': '/c2/o2',
+                     'X-Copy-From-Account': 'a'})
         res = req.get_response(app)
         self.assertEqual(res.status_int, 413)
         self.assertEqual(res.body, 'Upload exceeds quota.')
