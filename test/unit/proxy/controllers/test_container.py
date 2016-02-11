@@ -55,7 +55,7 @@ class TestContainerController(TestRingBase):
                 proxy_server.ContainerController):
 
             def account_info(controller, *args, **kwargs):
-                patch_path = 'swift.proxy.controllers.base.get_info'
+                patch_path = 'swift.proxy.controllers.base.get_account_info'
                 with mock.patch(patch_path) as mock_get_info:
                     mock_get_info.return_value = dict(self.account_info)
                     return super(FakeAccountInfoContainerController,
@@ -76,8 +76,16 @@ class TestContainerController(TestRingBase):
             req = Request.blank('/v1/a/c', {'PATH_INFO': '/v1/a/c'})
             resp = controller.HEAD(req)
         self.assertEqual(2, resp.status_int // 100)
+        # XXX okay, we're legitimately broken here... we should be
+        # populating the caches (really, just memcache is important though)
+        # with the results of our container HEAD, but we're not doing so.
+        # That's a real thing really worth fixing.
+        #
+        # Once fixed, make this comment say something about how populating
+        # memcache is the goal, but the infocache thing is a tolerable proxy
+        # for that, so that's what we're checking.
         self.assertTrue(
-            "swift.container/a/c" in resp.environ['swift.infocache'])
+            "swift.container/a/c" in req.environ['swift.infocache'])
         self.assertEqual(
             headers_to_container_info(resp.headers),
             resp.environ['swift.infocache']['swift.container/a/c'])
