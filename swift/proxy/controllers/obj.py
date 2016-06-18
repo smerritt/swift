@@ -1615,7 +1615,6 @@ class MIMEPutter(Putter):
         self.chunked = True  # MIME requests always send chunked body
         self.mime_boundary = mime_boundary
         self.multiphase = multiphase
-        self.chunk_hasher = md5()
 
     def _start_object_data(self):
         # We're sending the object plus other stuff in the same request
@@ -2068,8 +2067,16 @@ class ECObjectController(BaseObjectController):
         bytes_transferred = 0
         chunk_transform = chunk_transformer(policy, len(nodes))
         chunk_transform.send(None)
+        chunk_hashers = collections.defaultdict(md5)
 
         def send_chunk(chunk):
+            # Note: there's two different hashers in here. etag_hasher is
+            # hashing the original object so that we can validate the ETag
+            # that the client sent (and etag_hasher is None if the client
+            # didn't send one). The hasher in chunk_hashers is hashing the
+            # fragment archive being sent to the client; this lets us guard
+            # against data corruption on the network between proxy and
+            # object server.
             if etag_hasher:
                 etag_hasher.update(chunk)
             backend_chunks = chunk_transform.send(chunk)
@@ -2079,9 +2086,10 @@ class ECObjectController(BaseObjectController):
                 return
 
             for putter in list(putters):
-                backend_chunk = backend_chunks[chunk_index[putter]]
+                ci = chunk_index[putter]
+                backend_chunk = backend_chunks[ci]
                 if not putter.failed:
-                    putter.chunk_hasher.update(backend_chunk)
+                    chunk_hashers[ci].update(backend_chunk)
                     putter.send_chunk(backend_chunk)
                 else:
                     putters.remove(putter)
@@ -2142,15 +2150,14 @@ class ECObjectController(BaseObjectController):
                 footers = {(k, v) for k, v in footers.items()
                            if not k.lower().startswith('x-object-sysmeta-ec-')}
                 for putter in putters:
+                    ci = chunk_index[putter]
                     # Update any footers set by middleware with EC footers
                     trail_md = trailing_metadata(
                         policy, etag_hasher,
-                        bytes_transferred,
-                        chunk_index[putter])
+                        bytes_transferred, ci)
                     trail_md.update(footers)
                     # Etag footer must always be hash of what we sent
-                    trail_md['Etag'] = \
-                        putter.chunk_hasher.hexdigest()
+                    trail_md['Etag'] = chunk_hashers[ci].hexdigest()
                     putter.end_of_object_data(footer_metadata=trail_md)
 
                 for putter in putters:
