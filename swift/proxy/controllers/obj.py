@@ -743,20 +743,13 @@ class ReplicatedObjectController(BaseObjectController):
         return resp
 
     def _make_putter(self, node, part, req, headers):
-        if req.environ.get('swift.callback.update_footers'):
-            putter = MIMEPutter.connect(
-                node, part, req.swift_entity_path, headers,
-                conn_timeout=self.app.conn_timeout,
-                node_timeout=self.app.node_timeout,
-                logger=self.app.logger,
-                need_multiphase=False)
-        else:
-            putter = Putter.connect(
-                node, part, req.swift_entity_path, headers,
-                conn_timeout=self.app.conn_timeout,
-                node_timeout=self.app.node_timeout,
-                logger=self.app.logger,
-                chunked=req.is_chunked)
+        putter = Putter.connect(
+            node, part, req.swift_entity_path, headers,
+            conn_timeout=self.app.conn_timeout,
+            node_timeout=self.app.node_timeout,
+            logger=self.app.logger,
+            need_metadata_footer=bool(
+                req.environ.get('swift.callback.update_footers')))
         return putter
 
     def _transfer_data(self, req, data_source, putters, nodes):
@@ -1434,10 +1427,21 @@ class Putter(object):
     :param path: the object path to send to the storage node
     :param connect_duration: time taken to initiate the HTTPConnection
     :param logger: a Logger instance
-    :param chunked: boolean indicating if the request encoding is chunked
+    :param chunked: boolean indicating if the request to the object server
+                    shall use Transfer-Encoding: chunked
+    :param mime_boundary: boundary to use in MIME document; only used if
+                          metadata_footer or multiphase is set.
+    :param metadata_footer: boolean indicating if some metadata will be sent
+                            after the object data (things that are computed
+                            over the whole object body, like the object's
+                            ETag in case of erasure-coding)
+    :param multiphase: boolean indicating if we will be sending a second
+                       "commit" MIME subdocument (which, ultimately, causes
+                       the object server to write a .durable file).
     """
     def __init__(self, conn, node, resp, path, connect_duration, logger,
-                 chunked=False):
+                 chunked=False, mime_boundary=None, metadata_footer=False,
+                 multiphase=False):
         # Note: you probably want to call Putter.connect() instead of
         # instantiating one of these directly.
         self.conn = conn
@@ -1451,8 +1455,23 @@ class Putter(object):
         self.failed = False
         self.queue = None
         self.state = NO_DATA_SENT
-        self.chunked = chunked
         self.logger = logger
+        self.mime_boundary = mime_boundary
+        self.multiphase = multiphase
+        self.metadata_footer = metadata_footer
+
+        if multiphase or metadata_footer:
+            # We're going to be sending an indeterminate-length MIME
+            # document as the request body (with the object embedded in it),
+            # so we must use chunked transfer-encoding.
+            self.chunked = True
+            if not mime_boundary:
+                # Note: if you're calling Putter.connect(), it'll generate
+                # the MIME boundary for you
+                raise ValueError("can't send metadata footer or "
+                                 "multiphase-commit without mime_boundary")
+        else:
+            self.chunked = chunked
 
     def await_response(self, timeout, informational=False):
         """
@@ -1491,8 +1510,12 @@ class Putter(object):
 
     def _start_object_data(self):
         # Called immediately before the first chunk of object data is sent.
-        # Subclasses may implement custom behaviour
-        pass
+        if self.multiphase or self.metadata_footer:
+            # We're sending the object plus other stuff in the same request
+            # body, all wrapped up in multipart MIME, so we'd better start
+            # off the MIME document before sending any object data.
+            self.queue.put("--%s\r\nX-Document: object body\r\n\r\n" %
+                           (self.mime_boundary,))
 
     def send_chunk(self, chunk):
         if not chunk:
@@ -1510,15 +1533,78 @@ class Putter(object):
 
         self.queue.put(chunk)
 
-    def end_of_object_data(self, **kwargs):
+    def end_of_object_data(self, footer_metadata=None):
         """
-        Call when there is no more data to send.
+        Call when there is no more object data to send.
+
+        Sends any footer metadata.
+
+        :param footer_metadata: dictionary of metadata items
+                                to be sent as footers.
         """
         if self.state == DATA_SENT:
             raise ValueError("called end_of_object_data twice")
+        elif self.state == NO_DATA_SENT and self.mime_boundary:
+            self._start_object_data()
 
+        if not self.metadata_footer:
+            if footer_metadata:
+                # didn't ask to send footers at connect() time but now have
+                # some footers: the caller has a bug
+                raise ValueError(
+                    "Can't send metadata footers without MIME framing!")
+        else:
+            footer_body = json.dumps(footer_metadata)
+            footer_md5 = md5(footer_body).hexdigest()
+
+            tail_boundary = ("--%s" % (self.mime_boundary,))
+            if not self.multiphase:
+                # this will be the last part sent
+                tail_boundary = tail_boundary + "--"
+
+            message_parts = [
+                ("\r\n--%s\r\n" % self.mime_boundary),
+                "X-Document: object metadata\r\n",
+                "Content-MD5: %s\r\n" % footer_md5,
+                "\r\n",
+                footer_body, "\r\n",
+                tail_boundary, "\r\n",
+            ]
+            self.queue.put("".join(message_parts))
+
+        # XXX if not self.multiphase, maybe?
         self.queue.put('')
         self.state = DATA_SENT
+
+    def send_commit_confirmation(self):
+        """
+        Call when there are > quorum 2XX responses received. Send commit
+        confirmations to all object nodes to finalize the PUT; this will
+        result in .durable files being created. Only useful for
+        erasure-coded objects; replicated objects don't need the .durable
+        file.
+        """
+        if not self.multiphase:
+            raise ValueError(
+                "called send_commit_confirmation but multiphase is False")
+        if self.state == COMMIT_SENT:
+            raise ValueError("called send_commit_confirmation twice")
+
+        self.state = DATA_ACKED
+
+        if self.mime_boundary:
+            body = "put_commit_confirmation"
+            tail_boundary = ("--%s--" % (self.mime_boundary,))
+            message_parts = [
+                "X-Document: put commit\r\n",
+                "\r\n",
+                body, "\r\n",
+                tail_boundary,
+            ]
+            self.queue.put("".join(message_parts))
+
+        self.queue.put('')
+        self.state = COMMIT_SENT
 
     def _send_file(self, write_timeout, exception_handler):
         """
@@ -1578,151 +1664,68 @@ class Putter(object):
         return conn, resp, connect_duration
 
     @classmethod
-    def connect(cls, node, part, path, headers, conn_timeout, node_timeout,
-                logger=None, chunked=False, **kwargs):
-        """
-        Connect to a backend node and send the headers.
-
-        :returns: Putter instance
-
-        :raises: ConnectionTimeout if initial connection timed out
-        :raises: ResponseTimeout if header retrieval timed out
-        :raises: InsufficientStorage on 507 response from node
-        :raises: PutterConnectError on non-507 server error response from node
-        """
-        conn, resp, connect_duration = cls._make_connection(
-            node, part, path, headers, conn_timeout, node_timeout)
-        return cls(
-            conn, node, resp, path, connect_duration, logger, chunked=chunked)
-
-
-class MIMEPutter(Putter):
-    """
-    Putter for backend PUT requests that use MIME.
-
-    This is here mostly to wrap up the fact that all multipart PUTs are
-    chunked because of the mime boundary footer trick and the first
-    half of the two-phase PUT conversation handling.
-
-    An HTTP PUT request that supports streaming.
-    """
-    def __init__(self, conn, node, resp, req, connect_duration,
-                 logger, mime_boundary, multiphase=False):
-        super(MIMEPutter, self).__init__(conn, node, resp, req,
-                                         connect_duration, logger)
-        # Note: you probably want to call MimePutter.connect() instead of
-        # instantiating one of these directly.
-        self.chunked = True  # MIME requests always send chunked body
-        self.mime_boundary = mime_boundary
-        self.multiphase = multiphase
-
-    def _start_object_data(self):
-        # We're sending the object plus other stuff in the same request
-        # body, all wrapped up in multipart MIME, so we'd better start
-        # off the MIME document before sending any object data.
-        self.queue.put("--%s\r\nX-Document: object body\r\n\r\n" %
-                       (self.mime_boundary,))
-
-    def end_of_object_data(self, footer_metadata=None):
-        """
-        Call when there is no more data to send.
-
-        Overrides superclass implementation to send any footer metadata
-        after object data.
-
-        :param footer_metadata: dictionary of metadata items
-                                to be sent as footers.
-        """
-        if self.state == DATA_SENT:
-            raise ValueError("called end_of_object_data twice")
-        elif self.state == NO_DATA_SENT and self.mime_boundary:
-            self._start_object_data()
-
-        footer_body = json.dumps(footer_metadata)
-        footer_md5 = md5(footer_body).hexdigest()
-
-        tail_boundary = ("--%s" % (self.mime_boundary,))
-        if not self.multiphase:
-            # this will be the last part sent
-            tail_boundary = tail_boundary + "--"
-
-        message_parts = [
-            ("\r\n--%s\r\n" % self.mime_boundary),
-            "X-Document: object metadata\r\n",
-            "Content-MD5: %s\r\n" % footer_md5,
-            "\r\n",
-            footer_body, "\r\n",
-            tail_boundary, "\r\n",
-        ]
-        self.queue.put("".join(message_parts))
-
-        self.queue.put('')
-        self.state = DATA_SENT
-
-    def send_commit_confirmation(self):
-        """
-        Call when there are > quorum 2XX responses received.  Send commit
-        confirmations to all object nodes to finalize the PUT.
-        """
-        if not self.multiphase:
-            raise ValueError(
-                "called send_commit_confirmation but multiphase is False")
-        if self.state == COMMIT_SENT:
-            raise ValueError("called send_commit_confirmation twice")
-
-        self.state = DATA_ACKED
-
-        if self.mime_boundary:
-            body = "put_commit_confirmation"
-            tail_boundary = ("--%s--" % (self.mime_boundary,))
-            message_parts = [
-                "X-Document: put commit\r\n",
-                "\r\n",
-                body, "\r\n",
-                tail_boundary,
-            ]
-            self.queue.put("".join(message_parts))
-
-        self.queue.put('')
-        self.state = COMMIT_SENT
-
-    @classmethod
     def connect(cls, node, part, req, headers, conn_timeout, node_timeout,
-                logger=None, need_multiphase=True, **kwargs):
+                logger=None, need_metadata_footer=False,
+                need_multiphase=False):
         """
         Connect to a backend node and send the headers.
 
-        Override superclass method to notify object of need for support for
-        multipart body with footers and optionally multiphase commit, and
-        verify object server's capabilities.
+        Verifies that the object server to which we connect supports the
+        capabilities we need; for example, if we are called with
+        need_metadata_footer=True, then this method verifies that the object
+        server supports metadata footers.
+
+        Missing capabilities will only occur when the object server is
+        running older code than the proxy, like during a rolling upgrade.
 
         :param need_multiphase: if True then multiphase support is required of
                                 the object server
+        :param need_metadata_footer: if True then support for metadata in
+                                     footers is required of the object
+                                     server
         :raises: FooterNotSupported if need_metadata_footer is set but
                  backend node can't process footers
         :raises: MultiphasePUTNotSupported if need_multiphase is set but
                  backend node can't handle multiphase PUT
         """
-        mime_boundary = "%.64x" % random.randint(0, 16 ** 64)
+        chunked = False
         headers = HeaderKeyDict(headers)
-        # when using a multipart mime request to backend the actual
-        # content-length is not equal to the object content size, so move the
-        # object content size to X-Backend-Obj-Content-Length if that has not
-        # already been set by the EC PUT path.
-        headers.setdefault('X-Backend-Obj-Content-Length',
-                           headers.pop('Content-Length', None))
-        # We're going to be adding some unknown amount of data to the
-        # request, so we can't use an explicit content length, and thus
-        # we must use chunked encoding.
-        headers['Transfer-Encoding'] = 'chunked'
-        headers['Expect'] = '100-continue'
 
-        headers['X-Backend-Obj-Multipart-Mime-Boundary'] = mime_boundary
+        if need_metadata_footer or need_multiphase:
+            mime_boundary = "%.64x" % random.randint(0, 16 ** 64)
 
-        headers['X-Backend-Obj-Metadata-Footer'] = 'yes'
+            # When using a multipart mime request to backend the actual
+            # content-length is not equal to the object content size, so
+            # move the object content size to X-Backend-Obj-Content-Length
+            # if that has not already been set by the EC PUT path.
+            headers.setdefault('X-Backend-Obj-Content-Length',
+                               headers.pop('Content-Length', None))
+        else:
+            mime_boundary = None
+
+        if need_metadata_footer:
+            headers['X-Backend-Obj-Multipart-Mime-Boundary'] = mime_boundary
+            headers['X-Backend-Obj-Metadata-Footer'] = 'yes'
 
         if need_multiphase:
             headers['X-Backend-Obj-Multiphase-Commit'] = 'yes'
+
+        cl = headers.get('Content-Length')
+        if cl is None:
+            # indeterminate-length request body
+            headers['Expect'] = '100-continue'
+            headers['Transfer-Encoding'] = 'chunked'
+            chunked = True
+        elif int(cl) > 0:
+            # positive-length request body
+            headers['Expect'] = '100-continue'
+            headers.pop('Transfer-Encoding', None)
+            chunked = False
+        else:
+            # zero-length request body
+            headers.pop('Expect', None)
+            headers.pop('Transfer-Encoding', None)
+            chunked = False
 
         conn, resp, connect_duration = cls._make_connection(
             node, part, req, headers, conn_timeout, node_timeout)
@@ -1734,14 +1737,16 @@ class MIMEPutter(Putter):
             can_handle_multiphase_put = config_true_value(
                 continue_headers.get('X-Obj-Multiphase-Commit', 'no'))
 
-            if not can_send_metadata_footer:
+            if need_metadata_footer and not can_send_metadata_footer:
                 raise FooterNotSupported()
 
             if need_multiphase and not can_handle_multiphase_put:
                 raise MultiphasePUTNotSupported()
 
         return cls(conn, node, resp, req, connect_duration, logger,
-                   mime_boundary, multiphase=need_multiphase)
+                   chunked=chunked, mime_boundary=mime_boundary,
+                   metadata_footer=need_metadata_footer,
+                   multiphase=need_multiphase)
 
 
 def chunk_transformer(policy, nstreams):
@@ -2014,12 +2019,12 @@ class ECObjectController(BaseObjectController):
             resp.fix_conditional_response()
 
     def _make_putter(self, node, part, req, headers):
-        return MIMEPutter.connect(
+        return Putter.connect(
             node, part, req.swift_entity_path, headers,
             conn_timeout=self.app.conn_timeout,
             node_timeout=self.app.node_timeout,
             logger=self.app.logger,
-            need_multiphase=True)
+            need_metadata_footer=True, need_multiphase=True)
 
     def _determine_chunk_destinations(self, putters):
         """

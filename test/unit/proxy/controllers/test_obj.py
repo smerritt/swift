@@ -608,6 +608,7 @@ class TestReplicatedObjController(BaseObjectControllerMixin,
                                               body=test_body)
         if chunked:
             req.headers['Transfer-Encoding'] = 'chunked'
+            req.headers.pop('Content-Length', None)
         etag = md5(test_body).hexdigest()
         req.headers['Etag'] = etag
 
