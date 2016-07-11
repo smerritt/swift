@@ -20,6 +20,7 @@ from six.moves.configparser import ConfigParser
 from swift.common.utils import (
     config_true_value, SWIFT_CONF_FILE, whataremyips, list_from_csv)
 from swift.common.ring import Ring, RingData
+from swift.common.ring.ring_loader import RingLoader
 from swift.common.utils import quorum_size
 from swift.common.exceptions import RingValidationError
 from pyeclib.ec_iface import ECDriver, ECDriverError, VALID_EC_TYPES
@@ -365,7 +366,8 @@ class BaseStoragePolicy(object):
         """
         if self.object_ring:
             return
-        self.object_ring = Ring(swift_dir, ring_name=self.ring_name)
+        self.object_ring = \
+            RingLoader.get_instance(swift_dir).load_ring(self.ring_name)
 
         # Validate ring to make sure it conforms to policy requirements
         self._validate_ring()

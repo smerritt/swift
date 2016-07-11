@@ -150,7 +150,7 @@ class RingData(object):
                 'part_shift': self._part_shift}
 
 
-class Ring(object):
+class BaseRing(object):
     """
     Partitioned consistent hashing ring.
 
@@ -261,17 +261,6 @@ class Ring(object):
         :returns: True if the ring on disk has changed, False otherwise
         """
         return getmtime(self.serialized_path) != self._mtime
-
-    def _get_part_nodes(self, part):
-        part_nodes = []
-        seen_ids = set()
-        for r2p2d in self._replica2part2dev_id:
-            if part < len(r2p2d):
-                dev_id = r2p2d[part]
-                if dev_id not in seen_ids:
-                    part_nodes.append(self.devs[dev_id])
-                    seen_ids.add(dev_id)
-        return [dict(node, index=i) for i, node in enumerate(part_nodes)]
 
     def get_part(self, account, container=None, obj=None):
         """
@@ -452,3 +441,17 @@ class Ring(object):
                         if len(used) == self._num_devs:
                             hit_all_devs = True
                             break
+
+
+class Ring(BaseRing):
+    # XXX this class split is 100% horse poop
+    def _get_part_nodes(self, part):
+        part_nodes = []
+        seen_ids = set()
+        for r2p2d in self._replica2part2dev_id:
+            if part < len(r2p2d):
+                dev_id = r2p2d[part]
+                if dev_id not in seen_ids:
+                    part_nodes.append(self.devs[dev_id])
+                    seen_ids.add(dev_id)
+        return [dict(node, index=i) for i, node in enumerate(part_nodes)]
