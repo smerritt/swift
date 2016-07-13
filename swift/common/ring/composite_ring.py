@@ -17,6 +17,23 @@ import itertools
 import json
 from swift.common.ring.ring import BaseRing
 
+#NOTES/TODO:
+#
+# stair-step the primaries from each sub-ring
+#
+# just load Ring objects in CompositeRing; then we can lose the loop
+# detection
+#
+# making a composite out of non-disjoint rings is Not Supported(tm), so
+# don't worry about dupe detection
+#
+# look at Kota's patch and think hard about device IDs and uniqueness
+#
+# make the replicators work (implement .devs property) (also think about ID
+# uniqueness here)
+
+
+
 
 class CompositeRing(BaseRing):
     def __init__(self, ring_loader, ring_filename, already_used):
