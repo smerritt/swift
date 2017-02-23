@@ -23,6 +23,7 @@ from shutil import rmtree
 from hashlib import md5
 from tempfile import mkdtemp
 import textwrap
+from contextlib import closing
 from os.path import dirname, basename
 from test.unit import (FakeLogger, patch_policies, make_timestamp_iter,
                        DEFAULT_TEST_EC_TYPE)
@@ -158,7 +159,8 @@ class TestAuditor(unittest.TestCase):
             if disk_file.policy.policy_type == EC_POLICY:
                 data = disk_file.policy.pyeclib_driver.encode(data)[0]
             etag = md5()
-            with disk_file.create() as writer:
+            writer = disk_file.create()
+            with closing(writer):
                 writer.write(data)
                 etag.update(data)
                 etag = etag.hexdigest()
@@ -194,7 +196,8 @@ class TestAuditor(unittest.TestCase):
         data = b'0' * 1024
         etag = md5()
         timestamp = str(normalize_timestamp(time.time()))
-        with self.disk_file.create() as writer:
+        writer = self.disk_file.create()
+        with closing(writer):
             writer.write(data)
             etag.update(data)
             etag = etag.hexdigest()
@@ -218,7 +221,8 @@ class TestAuditor(unittest.TestCase):
         etag = md5(b'1' + b'0' * 1023).hexdigest()
         metadata['ETag'] = etag
 
-        with self.disk_file.create() as writer:
+        writer = self.disk_file.create()
+        with closing(writer):
             writer.write(data)
             writer.put(metadata)
             writer.commit(Timestamp(timestamp))
@@ -235,7 +239,8 @@ class TestAuditor(unittest.TestCase):
             # create diskfile and set ETag and content-length to match the data
             etag = md5(data).hexdigest()
             timestamp = str(normalize_timestamp(time.time()))
-            with disk_file.create() as writer:
+            writer = disk_file.create()
+            with closing(writer):
                 writer.write(data)
                 metadata = {
                     'ETag': etag,
@@ -443,7 +448,8 @@ class TestAuditor(unittest.TestCase):
         data = b'VERIFY'
         etag = md5()
         timestamp = str(normalize_timestamp(time.time()))
-        with self.disk_file.create() as writer:
+        writer = self.disk_file.create()
+        with closing(writer):
             writer.write(data)
             etag.update(data)
             metadata = {
@@ -520,7 +526,8 @@ class TestAuditor(unittest.TestCase):
         pre_errors = auditor_worker.errors
         data = b'0' * 1024
         etag = md5()
-        with self.disk_file.create() as writer:
+        writer = self.disk_file.create()
+        with closing(writer):
             writer.write(data)
             etag.update(data)
             etag = etag.hexdigest()
@@ -545,7 +552,8 @@ class TestAuditor(unittest.TestCase):
         data = b'0' * 1024
 
         def write_file(df):
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 writer.write(data)
                 metadata = {
                     'ETag': md5(data).hexdigest(),
@@ -571,7 +579,8 @@ class TestAuditor(unittest.TestCase):
         # pick up some additional code coverage, large file
         data = b'0' * 1024 * 1024
         for df in (self.disk_file, self.disk_file_ec):
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 writer.write(data)
                 metadata = {
                     'ETag': md5(data).hexdigest(),
@@ -625,7 +634,8 @@ class TestAuditor(unittest.TestCase):
         auditor_worker.last_logged = time.time()
         data = b'0' * 1024
         etag = md5()
-        with self.disk_file.create() as writer:
+        writer = self.disk_file.create()
+        with closing(writer):
             writer.write(data)
             etag.update(data)
             etag = etag.hexdigest()
@@ -649,7 +659,8 @@ class TestAuditor(unittest.TestCase):
         pre_quarantines = auditor_worker.quarantines
         data = b'0' * 10
         etag = md5()
-        with self.disk_file.create() as writer:
+        writer = self.disk_file.create()
+        with closing(writer):
             writer.write(data)
             etag.update(data)
             etag = etag.hexdigest()
@@ -665,7 +676,8 @@ class TestAuditor(unittest.TestCase):
                                                   policy=POLICIES.legacy)
         data = b'1' * 10
         etag = md5()
-        with self.disk_file.create() as writer:
+        writer = self.disk_file.create()
+        with closing(writer):
             writer.write(data)
             etag.update(data)
             etag = etag.hexdigest()
@@ -685,7 +697,8 @@ class TestAuditor(unittest.TestCase):
         self.auditor.log_time = 0
         data = b'0' * 1024
         etag = md5()
-        with self.disk_file.create() as writer:
+        writer = self.disk_file.create()
+        with closing(writer):
             writer.write(data)
             etag.update(data)
             etag = etag.hexdigest()
@@ -720,7 +733,8 @@ class TestAuditor(unittest.TestCase):
         self.auditor = auditor.ObjectAuditor(self.conf)
         self.auditor.log_time = 0
         etag = md5()
-        with self.disk_file.create() as writer:
+        writer = self.disk_file.create()
+        with closing(writer):
             etag = etag.hexdigest()
             metadata = {
                 'ETag': etag,

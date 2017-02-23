@@ -46,7 +46,7 @@ import xattr
 from os.path import basename, dirname, exists, join, splitext
 from random import shuffle
 from tempfile import mkstemp
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from collections import defaultdict
 from datetime import timedelta
 
@@ -1452,6 +1452,7 @@ class BaseDiskFileWriter(object):
         self._tmppath = tmppath
         self._bytes_per_sync = bytes_per_sync
         self._diskfile = diskfile
+        self._logger = self.manager.logger
 
         # Internal attributes
         self._upload_size = 0
@@ -1492,6 +1493,24 @@ class BaseDiskFileWriter(object):
             self._last_sync = self._upload_size
 
         return self._upload_size
+
+    def close(self):
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
+        if not self.put_succeeded:
+            # Try removing the temp file only if put did NOT succeed.
+            #
+            # dfw.put_succeeded is set to True after renamer() succeeds in
+            # DiskFileWriter._finalize_put()
+            try:
+                if self._tmppath:
+                    # when mkstemp() was used
+                    os.unlink(self._tmppath)
+            except OSError:
+                self._logger.exception(
+                    'Error removing tempfile: %s' % self._tmppath)
 
     def _finalize_put(self, metadata, target_path, cleanup):
         # Write the metadata before calling fsync() so that both data and
@@ -2446,11 +2465,10 @@ class BaseDiskFile(object):
             fd, tmppath = mkstemp(dir=self._tmpdir)
         return fd, tmppath
 
-    @contextmanager
     def create(self, size=None):
         """
-        Context manager to create a file. We create a temporary file first, and
-        then return a DiskFileWriter object to encapsulate the state.
+        Create a file. We create a temporary file first, and then return a
+        DiskFileWriter object to encapsulate the state.
 
         .. note::
 
@@ -2469,36 +2487,22 @@ class BaseDiskFile(object):
                 # No more inodes in filesystem
                 raise DiskFileNoSpace()
             raise
-        dfw = None
-        try:
-            if size is not None and size > 0:
-                try:
-                    fallocate(fd, size)
-                except OSError as err:
-                    if err.errno in (errno.ENOSPC, errno.EDQUOT):
-                        raise DiskFileNoSpace()
-                    raise
-            dfw = self.writer_cls(self._name, self._datadir, fd, tmppath,
-                                  bytes_per_sync=self._bytes_per_sync,
-                                  diskfile=self)
-            yield dfw
-        finally:
+        if size is not None and size > 0:
             try:
-                os.close(fd)
-            except OSError:
-                pass
-            if (dfw is None) or (not dfw.put_succeeded):
-                # Try removing the temp file only if put did NOT succeed.
-                #
-                # dfw.put_succeeded is set to True after renamer() succeeds in
-                # DiskFileWriter._finalize_put()
-                try:
-                    if tmppath:
-                        # when mkstemp() was used
+                fallocate(fd, size)
+            except OSError as err:
+                if tmppath:
+                    try:
                         os.unlink(tmppath)
-                except OSError:
-                    self._logger.exception('Error removing tempfile: %s' %
-                                           tmppath)
+                    except OSError:
+                        pass
+                if err.errno in (errno.ENOSPC, errno.EDQUOT):
+                    raise DiskFileNoSpace()
+                raise
+        dfw = self.writer_cls(self._name, self._datadir, fd, tmppath,
+                              bytes_per_sync=self._bytes_per_sync,
+                              diskfile=self)
+        return dfw
 
     def write_metadata(self, metadata):
         """
@@ -2510,7 +2514,8 @@ class BaseDiskFile(object):
         :raises DiskFileError: this implementation will raise the same
                             errors as the `create()` method.
         """
-        with self.create() as writer:
+        writer = self.create()
+        with closing(writer):
             writer._extension = '.meta'
             writer.put(metadata)
 
@@ -2533,7 +2538,8 @@ class BaseDiskFile(object):
         """
         # this is dumb, only tests send in strings
         timestamp = Timestamp(timestamp)
-        with self.create() as deleter:
+        deleter = self.create()
+        with closing(deleter):
             deleter._extension = '.ts'
             deleter.put({'X-Timestamp': timestamp.internal})
 

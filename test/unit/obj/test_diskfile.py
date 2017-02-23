@@ -2883,7 +2883,8 @@ class DiskFileMixin(BaseDiskFileTestMixin):
         if df.policy.policy_type == EC_POLICY:
             data = encode_frag_archive_bodies(df.policy, data)[df._frag_index]
 
-        with df.create() as writer:
+        writer = df.create()
+        with closing(writer):
             new_metadata = {
                 'ETag': md5(data).hexdigest(),
                 'X-Timestamp': timestamp.internal,
@@ -3242,7 +3243,7 @@ class DiskFileMixin(BaseDiskFileTestMixin):
             os.rmdir(tmpdir)
             df = self._simple_get_diskfile(policy=policy)
             df._use_linkat = False
-            with df.create():
+            with closing(df.create()):
                 self.assertTrue(os.path.exists(tmpdir))
 
     def _get_open_disk_file(self, invalid_type=None, obj_name='o', fsize=1024,
@@ -3272,7 +3273,8 @@ class DiskFileMixin(BaseDiskFileTestMixin):
         else:
             prealloc_size = None
 
-        with df.create(size=prealloc_size) as writer:
+        writer = df.create(size=prealloc_size)
+        with closing(writer):
             upload_size = writer.write(data)
             etag.update(data)
             etag = etag.hexdigest()
@@ -3580,7 +3582,8 @@ class DiskFileMixin(BaseDiskFileTestMixin):
         df = self.df_mgr.get_diskfile(self.existing_device, '0', 'abc', '123',
                                       'xyz', policy=POLICIES.legacy)
         with mock.patch("swift.obj.diskfile.fallocate") as fa:
-            with df.create(size=200) as writer:
+            writer = df.create(size=200)
+            with closing(writer):
                 used_fd = writer._fd
         fa.assert_called_with(used_fd, 200)
 
@@ -3592,7 +3595,7 @@ class DiskFileMixin(BaseDiskFileTestMixin):
                             mock.MagicMock(side_effect=OSError(
                                 e, os.strerror(e)))):
                 try:
-                    with df.create(size=200):
+                    with closing(df.create(size=200)):
                         pass
                 except DiskFileNoSpace:
                     pass
@@ -3604,7 +3607,7 @@ class DiskFileMixin(BaseDiskFileTestMixin):
                         mock.MagicMock(side_effect=OSError(
                             errno.EACCES, os.strerror(errno.EACCES)))):
             try:
-                with df.create(size=200):
+                with closing(df.create(size=200)):
                     pass
             except OSError:
                 pass
@@ -3620,7 +3623,7 @@ class DiskFileMixin(BaseDiskFileTestMixin):
                             mock.MagicMock(side_effect=OSError(
                                 e, os.strerror(e)))):
                 try:
-                    with df.create(size=200):
+                    with closing(df.create(size=200)):
                         pass
                 except DiskFileNoSpace:
                     pass
@@ -3632,7 +3635,7 @@ class DiskFileMixin(BaseDiskFileTestMixin):
                         mock.MagicMock(side_effect=OSError(
                             errno.EACCES, os.strerror(errno.EACCES)))):
             try:
-                with df.create(size=200):
+                with closing(df.create(size=200)):
                     pass
             except OSError:
                 pass
@@ -3646,7 +3649,7 @@ class DiskFileMixin(BaseDiskFileTestMixin):
                         mock.MagicMock(side_effect=OSError(
                             errno.EACCES, os.strerror(errno.EACCES)))):
             try:
-                with df.create(size=200):
+                with closing(df.create(size=200)):
                     pass
             except Exception as err:
                 self.fail("Unexpected exception raised: %r" % err)
@@ -3853,7 +3856,8 @@ class DiskFileMixin(BaseDiskFileTestMixin):
                                            obj='o', policy=policy)
 
             timestamp = Timestamp(time())
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 metadata = {
                     'ETag': 'bogus_etag',
                     'X-Timestamp': timestamp.internal,
@@ -3875,7 +3879,8 @@ class DiskFileMixin(BaseDiskFileTestMixin):
                                            obj='o_error', policy=policy)
 
             timestamp = Timestamp(time())
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 metadata = {
                     'ETag': 'bogus_etag',
                     'X-Timestamp': timestamp.internal,
@@ -3913,7 +3918,8 @@ class DiskFileMixin(BaseDiskFileTestMixin):
             df = self._simple_get_diskfile(account='a', container='c',
                                            obj='o_error', policy=policy)
             timestamp = Timestamp(time())
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 metadata = {
                     'ETag': 'bogus_etag',
                     'X-Timestamp': timestamp.internal,
@@ -3939,7 +3945,8 @@ class DiskFileMixin(BaseDiskFileTestMixin):
             df = self._simple_get_diskfile(account='a', container='c',
                                            obj='o_error', policy=policy)
             timestamp = Timestamp(time())
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 metadata = {
                     'ETag': 'bogus_etag',
                     'X-Timestamp': timestamp.internal,
@@ -4595,7 +4602,7 @@ class DiskFileMixin(BaseDiskFileTestMixin):
         with mock.patch("swift.obj.diskfile.fallocate", _m_fallocate):
             with mock.patch("os.unlink", _m_unlink):
                 try:
-                    with df.create(size=100):
+                    with closing(df.create(size=100)):
                         pass
                 except DiskFileNoSpace:
                     pass
@@ -4621,7 +4628,8 @@ class DiskFileMixin(BaseDiskFileTestMixin):
         with mock.patch("swift.obj.diskfile.renamer", _m_renamer):
             with mock.patch("os.unlink", _m_unlink):
                 try:
-                    with df.create(size=100) as writer:
+                    writer = df.create(size=100)
+                    with closing(writer):
                         writer.write(data)
                         writer.put(metadata)
                 except OSError:
@@ -4645,7 +4653,7 @@ class DiskFileMixin(BaseDiskFileTestMixin):
         with mock.patch("swift.obj.diskfile.fallocate", _m_fallocate):
             with mock.patch("os.unlink", _m_unlink):
                 try:
-                    with df.create(size=100):
+                    with closing(df.create(size=100)):
                         pass
                 except DiskFileNoSpace:
                     pass
@@ -4730,7 +4738,8 @@ class DiskFileMixin(BaseDiskFileTestMixin):
         }
         _m_renamer = mock.Mock()
         with mock.patch("swift.obj.diskfile.renamer", _m_renamer):
-            with df.create(size=100) as writer:
+            writer = df.create(size=100)
+            with closing(writer):
                 writer.write(data)
                 writer.put(metadata)
                 self.assertTrue(writer.put_succeeded)
@@ -4754,7 +4763,8 @@ class TestECDiskFile(DiskFileMixin, unittest.TestCase):
                                        obj='o_rename_err',
                                        policy=POLICIES.default)
         timestamp = Timestamp(time())
-        with df.create() as writer:
+        writer = df.create()
+        with closing(writer):
             metadata = {
                 'ETag': 'bogus_etag',
                 'X-Timestamp': timestamp.internal,
@@ -4810,7 +4820,8 @@ class TestECDiskFile(DiskFileMixin, unittest.TestCase):
                                        obj='o_fsync_dir_err',
                                        policy=POLICIES.default)
         timestamp = Timestamp(time())
-        with df.create() as writer:
+        writer = df.create()
+        with closing(writer):
             metadata = {
                 'ETag': 'bogus_etag',
                 'X-Timestamp': timestamp.internal,
@@ -4959,7 +4970,8 @@ class TestECDiskFile(DiskFileMixin, unittest.TestCase):
                     'Content-Length': 0,
                     'Etag': EMPTY_ETAG,
                     'Content-Type': 'plain/text'}
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 try:
                     writer.put(meta)
                     self.fail('Expected DiskFileError for frag_index %s'
@@ -4976,7 +4988,8 @@ class TestECDiskFile(DiskFileMixin, unittest.TestCase):
                     'Content-Length': 0,
                     'Etag': EMPTY_ETAG,
                     'Content-Type': 'plain/text'}
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 try:
                     writer.put(meta)
                     self.fail('Expected DiskFileError for frag_index %s'
@@ -6733,7 +6746,8 @@ class TestSuffixHashes(unittest.TestCase):
             suffix = os.path.basename(os.path.dirname(df._datadir))
             # write a datafile
             timestamp = self.ts()
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 test_data = 'test file'
                 writer.write(test_data)
                 metadata = {
@@ -7209,7 +7223,8 @@ class TestSuffixHashes(unittest.TestCase):
                                      'o', policy=policy,
                                      frag_index=7)
             suffix = os.path.basename(os.path.dirname(df._datadir))
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 test_data = 'test_data'
                 writer.write(test_data)
                 metadata = {
@@ -7423,7 +7438,8 @@ class TestSuffixHashes(unittest.TestCase):
                                      *other_paths[1], policy=policy,
                                      frag_index=5)
             timestamp = self.ts()
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 test_data = 'test_file'
                 writer.write(test_data)
                 metadata = {
@@ -7443,7 +7459,8 @@ class TestSuffixHashes(unittest.TestCase):
                                      frag_index=6)
             matching_suffix = os.path.basename(os.path.dirname(df._datadir))
             timestamp = self.ts()
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 test_data = 'test_file'
                 writer.write(test_data)
                 metadata = {
@@ -7465,7 +7482,8 @@ class TestSuffixHashes(unittest.TestCase):
             self.assertEqual(os.path.basename(os.path.dirname(df._datadir)),
                              matching_suffix)  # sanity
             timestamp = self.ts()
-            with df.create() as writer:
+            writer = df.create()
+            with closing(writer):
                 test_data = 'test_file'
                 writer.write(test_data)
                 metadata = {

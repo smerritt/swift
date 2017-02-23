@@ -18,6 +18,7 @@ import shutil
 import tempfile
 import unittest
 import time
+from contextlib import closing
 
 from swift.common import utils
 from swift.common.storage_policy import POLICIES
@@ -29,7 +30,8 @@ def write_diskfile(df, timestamp, data='test data', frag_index=None,
     # Helper method to write some data and metadata to a diskfile.
     # Optionally do not commit the diskfile, or commit but using a legacy
     # durable file
-    with df.create() as writer:
+    writer = df.create()
+    with closing(writer):
         writer.write(data)
         metadata = {
             'ETag': hashlib.md5(data).hexdigest(),

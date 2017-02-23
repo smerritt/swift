@@ -2504,7 +2504,8 @@ class TestObjectReconstructor(unittest.TestCase):
         df = df_mgr.get_diskfile(self.local_dev['device'], partition, 'a',
                                  'c', 'data-obj', policy=self.policy)
         ts = self.ts()
-        with df.create() as writer:
+        writer = df.create()
+        with closing(writer):
             test_data = 'test data'
             writer.write(test_data)
             metadata = {

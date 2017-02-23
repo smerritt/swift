@@ -23,6 +23,7 @@ import time
 import traceback
 import socket
 import math
+from contextlib import closing
 from swift import gettext_ as _
 from hashlib import md5
 
@@ -713,7 +714,8 @@ class ObjectController(BaseStorageServer):
         etag = md5()
         elapsed_time = 0
         try:
-            with disk_file.create(size=fsize) as writer:
+            writer = disk_file.create(size=fsize)
+            with closing(writer):
                 upload_size = 0
 
                 # If the proxy wants to send us object metadata after the

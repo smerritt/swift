@@ -17,6 +17,7 @@
 import eventlet
 import eventlet.wsgi
 import eventlet.greenio
+from contextlib import closing
 from six.moves import urllib
 
 from swift.common import exceptions
@@ -280,7 +281,8 @@ class Receiver(object):
             # We have the frag, just missing durable state, so make the frag
             # durable now. Try this just once to avoid looping if it fails.
             try:
-                with df.create() as writer:
+                writer = df.create()
+                with closing(writer):
                     writer.commit(remote['ts_data'])
                 return self._check_local(remote, make_durable=False)
             except Exception:

@@ -762,7 +762,8 @@ class TestObjectReplicator(unittest.TestCase):
             # primary
             ts = next(self.ts)
             df = self.df_mgr.get_diskfile('sda', '0', 'a', 'c', 'o', policy)
-            with df.create() as w:
+            w = df.create()
+            with closing(w):
                 w.write('asdf')
                 w.put({'X-Timestamp': ts.internal})
                 w.commit(ts)
@@ -770,7 +771,8 @@ class TestObjectReplicator(unittest.TestCase):
             # handoff
             ts = next(self.ts)
             df = self.df_mgr.get_diskfile('sda', '1', 'a', 'c', 'o', policy)
-            with df.create() as w:
+            w = df.create()
+            with closing(w):
                 w.write('asdf')
                 w.put({'X-Timestamp': ts.internal})
                 w.commit(ts)
@@ -845,7 +847,8 @@ class TestObjectReplicator(unittest.TestCase):
         for policy in POLICIES:
             ts = next(self.ts)
             df = self.df_mgr.get_diskfile('sda', '1', 'a', 'c', 'o', policy)
-            with df.create() as w:
+            w = df.create()
+            with closing(w):
                 w.write('asdf')
                 w.put({'X-Timestamp': ts.internal})
                 w.commit(ts)
@@ -962,7 +965,8 @@ class TestObjectReplicator(unittest.TestCase):
         df = self.df_mgr.get_diskfile('sda', '0', 'a', 'c', 'o',
                                       policy=POLICIES.legacy)
         ts = next(self.ts)
-        with df.create() as w:
+        w = df.create()
+        with closing(w):
             w.write('asdf')
             w.put({'X-Timestamp': ts.internal})
             w.commit(ts)

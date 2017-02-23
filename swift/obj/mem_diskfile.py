@@ -17,7 +17,6 @@
 
 import time
 import hashlib
-from contextlib import contextmanager
 
 from eventlet import Timeout
 from six import moves
@@ -132,6 +131,13 @@ class DiskFileWriter(object):
 
         :param timestamp: object put timestamp, an instance of
                           :class:`~swift.common.utils.Timestamp`
+        """
+        pass
+
+    def close(self):
+        """
+        Close the file and clean up any temporary files. Since we're in memory,
+        there's nothing to do here.
         """
         pass
 
@@ -406,7 +412,6 @@ class DiskFile(object):
         self._fp = None
         return dr
 
-    @contextmanager
     def create(self, size=None):
         """
         Context manager to create a file. We create a temporary file first, and
@@ -417,10 +422,7 @@ class DiskFile(object):
         :raises DiskFileNoSpace: if a size is specified and allocation fails
         """
         fp = moves.cStringIO()
-        try:
-            yield DiskFileWriter(self._filesystem, self._name, fp)
-        finally:
-            del fp
+        return DiskFileWriter(self._filesystem, self._name, fp)
 
     def write_metadata(self, metadata):
         """
