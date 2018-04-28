@@ -278,6 +278,7 @@ def run_daemon(klass, conf_file, section_name='', once=False, **kwargs):
         # and results in an exit code of 1.
         sys.exit(e)
 
+    utils.eventlet_monkey_patch()
     use_hub(utils.get_hub())
 
     # once on command line (i.e. daemonize=false) will over-ride config

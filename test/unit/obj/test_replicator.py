@@ -1840,7 +1840,7 @@ class TestObjectReplicator(unittest.TestCase):
             set_default(self)
             ring = job['policy'].object_ring
             self.headers['X-Backend-Storage-Policy-Index'] = int(job['policy'])
-            self.replicator.update(job)
+            self.replicator.update(job, {})
             error_lines = self.logger.get_lines_for_level('error')
             expected = []
             # ... first the primaries
@@ -1876,7 +1876,7 @@ class TestObjectReplicator(unittest.TestCase):
         error = 'Invalid response %(resp)s from %(ip)s'
         for job in jobs:
             set_default(self)
-            self.replicator.update(job)
+            self.replicator.update(job, {})
             # ... only the primaries
             expected = [error % {'resp': 400, 'ip': node['replication_ip']}
                         for node in job['nodes']]
@@ -1892,7 +1892,7 @@ class TestObjectReplicator(unittest.TestCase):
         expect = 'Error syncing with node: %r: '
         for job in jobs:
             set_default(self)
-            self.replicator.update(job)
+            self.replicator.update(job, {})
             # ... only the primaries
             expected = [expect % node for node in job['nodes']]
             error_lines = self.logger.get_lines_for_level('error')
@@ -1911,7 +1911,7 @@ class TestObjectReplicator(unittest.TestCase):
             if job['partition'] == '0' and int(job['policy']) == 0:
                 local_job = job.copy()
                 continue
-            self.replicator.update(job)
+            self.replicator.update(job, {})
             self.assertEqual([], self.logger.get_lines_for_level('error'))
             self.assertEqual(len(self.replicator.partition_times), 1)
             self.assertEqual(self.replicator.suffix_hash, 0)
@@ -1927,7 +1927,7 @@ class TestObjectReplicator(unittest.TestCase):
         set_default(self)
         self.replicator.sync = fake_func = \
             mock.MagicMock(return_value=(True, []))
-        self.replicator.update(local_job)
+        self.replicator.update(local_job, {})
         reqs = []
         for node in local_job['nodes']:
             reqs.append(mock.call(node, local_job, ['a83']))
@@ -1951,7 +1951,7 @@ class TestObjectReplicator(unittest.TestCase):
                 break
         # The candidate nodes to replicate (i.e. dev1 and dev3)
         # belong to another region
-        self.replicator.update(job)
+        self.replicator.update(job, {})
         self.assertEqual(fake_func.call_count, 1)
         stats = self.replicator.total_stats
         self.assertEqual(stats.attempted, 1)
@@ -1971,7 +1971,7 @@ class TestObjectReplicator(unittest.TestCase):
         # with only one set of headers make sure we specify index 0 here
         # as otherwise it may be different from earlier tests
         self.headers['X-Backend-Storage-Policy-Index'] = 0
-        self.replicator.update(repl_job)
+        self.replicator.update(repl_job, {})
         reqs = []
         for node in repl_job['nodes']:
             reqs.append(mock.call(node['replication_ip'],

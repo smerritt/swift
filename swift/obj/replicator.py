@@ -17,6 +17,7 @@ from collections import defaultdict
 import os
 import errno
 from os.path import isdir, isfile, join, dirname
+import contextlib
 import random
 import shutil
 import time
@@ -37,9 +38,11 @@ from swift.common.utils import whataremyips, unlink_older_than, \
     tpool_reraise, config_auto_int_value, storage_directory, \
     load_recon_cache, PrefixLoggerAdapter, parse_override_options, \
     distribute_evenly
+from swift.common.baroque_rpc import unix_socket_server
 from swift.common.bufferedhttp import http_connect
 from swift.common.daemon import Daemon
 from swift.common.http import HTTP_OK, HTTP_INSUFFICIENT_STORAGE
+from swift.common.manager import RUN_DIR
 from swift.obj import ssync_sender
 from swift.obj.diskfile import get_data_dir, get_tmp_dir, DiskFileRouter
 from swift.common.storage_policy import POLICIES, REPL_POLICY
@@ -113,6 +116,24 @@ class Stats(object):
             self.failure_nodes[ip][device] += 1
 
 
+class Scoreboard(object):
+    def __init__(self):
+        self._seq = itertools.count(0)
+        self._inflight = {}
+
+    @contextlib.contextmanager
+    def active_replication(self, repl_info):
+        seqnum = next(self._seq)
+        self._inflight[seqnum] = repl_info
+        try:
+            yield repl_info
+        finally:
+            self._inflight.pop(seqnum)
+
+    def all_active_replications(self):
+        return self._inflight.values()
+
+
 class ObjectReplicator(Daemon):
     """
     Replicate objects.
@@ -181,6 +202,7 @@ class ObjectReplicator(Daemon):
         self.is_multiprocess_worker = None
         self._df_router = DiskFileRouter(conf, self.logger)
         self._child_process_reaper_queue = queue.LightQueue()
+        self.scoreboard = Scoreboard()
 
     def _zero_stats(self):
         self.stats_for_dev = defaultdict(Stats)
@@ -453,12 +475,15 @@ class ObjectReplicator(Daemon):
                 return False
         return True
 
-    def update_deleted(self, job):
+    def update_deleted(self, job, scoreboard_entry):
         """
         High-level method that replicates a single partition that doesn't
         belong on this node.
 
         :param job: a dict containing info about the partition to be replicated
+
+        :param scoreboard_entry: a dict containing info about the currently
+            running job
         """
 
         def tpool_get_suffixes(path):
@@ -579,11 +604,26 @@ class ObjectReplicator(Daemon):
                         suffix_dir)
         return success_paths, error_paths
 
-    def update(self, job):
+    def run_job(self, job):
+        entry = {'device': job['device'],
+                 'delete': job['delete'],
+                 'partition': job['partition'],
+                 'storage_policy': job['policy'].idx}
+
+        with self.scoreboard.active_replication(entry) as scoreboard_entry:
+            if job["delete"]:
+                return self.update_deleted(job, scoreboard_entry)
+            else:
+                return self.update(job, scoreboard_entry)
+
+    def update(self, job, scoreboard_entry):
         """
         High-level method that replicates a single partition.
 
         :param job: a dict containing info about the partition to be replicated
+
+        :param scoreboard_entry: a dict containing info about the currently
+            running job
         """
         stats = self.stats_for_dev[job['device']]
         stats.attempted += 1
@@ -593,6 +633,7 @@ class ObjectReplicator(Daemon):
         target_devs_info = set()
         failure_devs_info = set()
         begin = time.time()
+        scoreboard_entry['begin'] = begin
         df_mgr = self._df_router[job['policy']]
         try:
             hashed, local_hash = tpool_reraise(
@@ -620,6 +661,10 @@ class ObjectReplicator(Daemon):
                 if node['region'] in synced_remote_regions:
                     continue
                 try:
+                    scoreboard_entry['current_peer'] = {
+                        'replication_ip': node['replication_ip'],
+                        'replication_port': node['replication_port'],
+                        'device': node['device']}
                     with Timeout(self.http_timeout):
                         resp = http_connect(
                             node['replication_ip'], node['replication_port'],
@@ -680,6 +725,8 @@ class ObjectReplicator(Daemon):
                                            node['device']))
                     self.logger.exception(_("Error syncing with node: %s") %
                                           node)
+                finally:
+                    scoreboard_entry.pop('current_peer', None)
             stats.suffix_count += len(local_hash)
         except StopIteration:
             self.logger.error('Ran out of handoffs while replicating '
@@ -945,10 +992,7 @@ class ObjectReplicator(Daemon):
                         continue
                 except OSError:
                     continue
-                if job['delete']:
-                    self.run_pool.spawn(self.update_deleted, job)
-                else:
-                    self.run_pool.spawn(self.update, job)
+                self.run_pool.spawn(self.run_job, job)
             current_nodes = None
             self.run_pool.waitall()
         except (Exception, Timeout) as err:
@@ -1074,20 +1118,33 @@ class ObjectReplicator(Daemon):
         self.logger.info(_("Starting object replicator in daemon mode."))
         eventlet.spawn_n(self._child_process_reaper)
         # Run the replicator continually
-        while True:
-            self._zero_stats()
-            self.logger.info(_("Starting object replication pass."))
-            # Run the replicator
-            start = time.time()
-            self.replicate(override_devices=override_devices)
-            end = time.time()
-            total = (end - start) / 60
-            self.logger.info(
-                _("Object replication complete. (%.02f minutes)"), total)
-            self.update_recon(total, end, override_devices)
-            self.logger.debug('Replication sleeping for %s seconds.',
-                              self.interval)
-            sleep(self.interval)
+        sock_filename = 'swift-object-replicator-p%d%s.sock' % (
+            self.port,
+            "-%d" % multiprocess_worker_index if multiprocess_worker_index
+            else "")
+        with unix_socket_server(os.path.join(RUN_DIR, sock_filename),
+                                {'status': self._status_report}):
+            while True:
+                self._zero_stats()
+                self.logger.info(_("Starting object replication pass."))
+                # Run the replicator
+                start = time.time()
+                self.replicate(override_devices=override_devices)
+                end = time.time()
+                total = (end - start) / 60
+                self.logger.info(
+                    _("Object replication complete. (%.02f minutes)"), total)
+                self.update_recon(total, end, override_devices)
+                self.logger.debug('Replication sleeping for %s seconds.',
+                                  self.interval)
+                sleep(self.interval)
+
+    def _status_report(self):
+        return {
+            'pid': os.getpid(),
+            'stats': self.total_stats.to_recon(),
+            'active': list(self.scoreboard.all_active_replications()),
+        }
 
     def post_multiprocess_run(self):
         # This method is called after run_once using multiple workers.
