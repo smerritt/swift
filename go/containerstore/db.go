@@ -15,18 +15,26 @@
 //
 // We've got three different formats for data stored in RocksDB.
 //
-// Container metadata looks like this:
+// Container attributes, including user metadata and system metadata, look like this:
 //
 //   Key: [
-//         0x00              1 byte: metadataKeyPrefix
+//         0x00              1 byte: metadataKeyPrefix (so we can store other types of stuff here later)
+//
 //         <partition>       4 bytes: uint32, network byte order
+//
 //         <container hash>  16 bytes: hash of container name
-//         <datum name>      variable length string
+//
+//         <datum type>      2 bytes, of type containerAttributeName
+//
+//         <datum>           variable length string; can be user metadata (like 'X-Container-Meta-Flavor'),
+//                           system metadata, or empty (for fields like PutTimestamp)
+//
 //         0x00              1 byte: key version (always 0 until we need a new key format)
 //        ]
 //
 //   Value: [
-//           type    1 byte
+//           <type>  1 byte
+//
 //           value   variable length
 //          ]
 //
@@ -92,7 +100,9 @@ const (
 )
 
 const (
-	containerAttributePrefixSize = 1 + 4 + 16 // prefix + partition + container hash
+	containerAttributePrefixSize  = 1 + 4 + 16 // prefix + partition + container hash
+	containerAttributeNameSize    = 2          // size of uint16
+	containerAttributeVersionSize = 1
 )
 
 type MetadataItem struct {
@@ -191,8 +201,20 @@ func packAttributeKey(prefix []byte, name containerAttributeName) []byte {
 	return buf.Bytes()
 }
 
-func unpackAttributeKey(value []byte) ([]byte, containerAttributeName) {
+func unpackAttributeKey(value []byte) (prefix []byte, name containerAttributeName, remainder []byte, err error) {
+	minLength := containerAttributePrefixSize + containerAttributeNameSize + containerAttributeVersionSize
+	if len(value) < minLength {
+		err = fmt.Errorf("Couldn't unpack attribute key: wanted value of length >= %d, got %d",
+			minLength, len(value))
+		return
+	} else if value[len(value)-1] != 0 {
+		err = fmt.Errorf("Couldn't unpack attribute key: wanted version 0, got %d", value[len(value)-1])
+	}
 
+	prefix = value[:containerAttributePrefixSize]
+	name = containerAttributeName(binary.BigEndian.Uint16(value[containerAttributePrefixSize:]))
+	remainder = value[containerAttributePrefixSize+containerAttributeNameSize : len(value)-1]
+	return
 }
 
 func packMetadataKey(prefix []byte, key string) []byte {
@@ -200,6 +222,7 @@ func packMetadataKey(prefix []byte, key string) []byte {
 	buf.Write(prefix)
 	binary.Write(buf, binary.BigEndian, uint16(metadataType))
 	buf.WriteString(key)
+	buf.WriteByte(0) // key-format version
 	return buf.Bytes()
 }
 
@@ -323,12 +346,15 @@ func (cs *ContainerStore) GetContainer(partition uint32, account string, contain
 		key := iter.Key().Data()
 		value := iter.Value().Data()
 
-		// throw out the table prefix, partition, and container hash
-		relevantSubkey := key[containerAttributePrefixSize:]
-		fmt.Printf("%v -> %v\n", relevantSubkey, value)
-		attr := containerAttributeName(binary.BigEndian.Uint16(relevantSubkey))
+		fmt.Printf("%v -> %v\n", key, value)
 
-		switch attr {
+		// throw out the table prefix, partition, and container hash
+		_, attrName, attrData, err := unpackAttributeKey(key)
+		if err != nil {
+			return nil, false, err
+		}
+
+		switch attrName {
 		case accountType:
 		case containerType:
 		case createdAtType:
@@ -407,9 +433,10 @@ func (cs *ContainerStore) GetContainer(partition uint32, account string, contain
 				return nil, false, errors.Wrap(err, "Couldn't unpack ReconcilerSyncPoint")
 			}
 		case metadataType:
+			attrData = attrData
 			// TODO: writeme
 		default:
-			return nil, false, fmt.Errorf("Unknown container attribute type %v", attr)
+			return nil, false, fmt.Errorf("Unknown container attribute type %v", attrName)
 		}
 
 	}
