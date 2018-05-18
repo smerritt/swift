@@ -152,5 +152,39 @@ func TestContainerMetadataUpdate(t *testing.T) {
 }
 
 func TestContainerMetadataMultipleUpdates(t *testing.T) {
-	// This tests the partial merge operator
+	assert := assert.New(t)
+	cstore, cleanup := makeTestDb()
+	defer cleanup()
+
+	accountName := "incommodement"
+	containerName := "maladventure"
+
+	now := time.Now()
+	meta := make([]MetadataItem, 0)
+	meta = append(meta, MetadataItem{Name: "SerialNumber", Value: "1"})
+	err := cstore.CreateContainer(12345, CreateContainerRequest{
+		Account:            accountName,
+		Container:          containerName,
+		Timestamp:          now,
+		StoragePolicyIndex: 8,
+		Metadata:           meta})
+	assert.Nil(err)
+
+	for i := 0; i < 5; i++ {
+		now = now.Add(time.Second)
+		err = cstore.UpdateContainer(12345, UpdateContainerRequest{
+			Account:   accountName,
+			Container: containerName,
+			Timestamp: now,
+			Metadata: []MetadataItem{
+				MetadataItem{Name: "SerialNumber", Value: fmt.Sprintf("%d", i*100)}},
+		})
+		assert.Nil(err)
+	}
+	cinfo, containerExists, err := cstore.GetContainer(12345, accountName, containerName)
+	assert.True(containerExists)
+	assert.Nil(err)
+	assert.Equal(1, len(cinfo.Metadata))
+	assert.Equal(cinfo.Metadata[0].Name, "SerialNumber")
+	assert.Equal(cinfo.Metadata[0].Value, "400")
 }

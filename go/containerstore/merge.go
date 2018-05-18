@@ -18,7 +18,7 @@ func mergeContainerMetadataValues(left, right []byte) ([]byte, error) {
 	if err != nil {
 		return []byte{}, err
 	}
-	_, rightTime, err := unpackStringTimestampPair(left)
+	_, rightTime, err := unpackStringTimestampPair(right)
 	if err != nil {
 		return []byte{}, err
 	}
@@ -33,6 +33,22 @@ func mergeContainerMetadataValues(left, right []byte) ([]byte, error) {
 
 func partialMergeContainerAttributes(key, leftOperand, rightOperand []byte) ([]byte, bool) {
 	// both leftOperand and rightOperand are the values passed to Merge() calls
+	_, attrType, _, err := unpackAttributeKey(key)
+	if err != nil {
+		return []byte{}, false
+	}
+
+	switch attrType {
+	case metadataType:
+		newer, err := mergeContainerMetadataValues(leftOperand, rightOperand)
+		if err != nil {
+			return newer, false
+		}
+		return newer, true
+	}
+
+	// If it's a thing we don't know how to merge, then return false and hope that the full merge knows what to do with
+	// it.
 	return []byte{}, false
 }
 
