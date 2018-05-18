@@ -14,6 +14,18 @@ package containerstore
 
 import "time"
 
+type MetadataItem struct {
+	Name      string
+	Value     string
+	Timestamp time.Time
+}
+
+type PolicyStat struct {
+	PolicyIndex int64
+	BytesUsed   uint64
+	ObjectCount uint64
+}
+
 type ContainerInfo struct {
 	Account                 string
 	Container               string
@@ -33,14 +45,7 @@ type ContainerInfo struct {
 	ContainerSyncPoint2     int64
 	ReconcilerSyncPoint     int64
 	Metadata                []MetadataItem
-}
-
-type CreateContainerRequest struct {
-	Account            string
-	Container          string
-	Timestamp          time.Time
-	StoragePolicyIndex int64
-	Metadata           []MetadataItem
+	Stats                   []PolicyStat
 }
 
 func defaultContainerInfo() *ContainerInfo {

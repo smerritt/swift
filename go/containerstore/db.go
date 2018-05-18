@@ -44,6 +44,8 @@ package containerstore
 // TODO:
 //
 // * we've got constants hashType and md5HashType; this is confusing
+//
+// make a real type for MD5 hash values instead of just [16]byte
 
 import (
 	"bytes"
@@ -72,7 +74,7 @@ const (
 	uint64Type
 	int64Type
 	md5HashType
-	nameTimestampPairType
+	stringTimestampPairType
 )
 
 // Don't change these values; they're part of the on-disk format.
@@ -105,10 +107,19 @@ const (
 	containerAttributeVersionSize = 1
 )
 
-type MetadataItem struct {
-	Name      string
-	Value     string
+type CreateContainerRequest struct {
+	Account            string
+	Container          string
+	Timestamp          time.Time
+	StoragePolicyIndex int64
+	Metadata           []MetadataItem
+}
+
+type UpdateContainerRequest struct {
+	Account   string
+	Container string
 	Timestamp time.Time
+	Metadata  []MetadataItem
 }
 
 type ContainerStore struct {
@@ -137,6 +148,7 @@ func Open(devicesPath string, device string, ph pathhasher.Hasher) (*ContainerSt
 	dbOpts := gorocksdb.NewDefaultOptions()
 
 	// TODO: merge operator for metadata, chexor, object count (metaOpts)
+	metaOpts.SetMergeOperator(&mergeOperatorContainerAttributes{})
 
 	// TODO: compaction filter to strip out old tombstones (objOpts)
 
@@ -226,18 +238,20 @@ func packMetadataKey(prefix []byte, key string) []byte {
 	return buf.Bytes()
 }
 
-func unpackStringValue(value []byte) (string, error) {
-	if value[0] != stringType {
-		return "", fmt.Errorf("Couldn't unpack string value: wanted type-byte %d, got %d", stringType, value[0])
-	}
-	return string(value[1:]), nil
-}
-
 func packStringValue(value string) []byte {
 	buf := bytes.NewBuffer(make([]byte, 0, len(value)+1))
 	buf.WriteByte(stringType)
 	buf.WriteString(value)
 	return buf.Bytes()
+}
+
+func unpackStringValue(value []byte) (string, error) {
+	if len(value) < 1 {
+		return "", fmt.Errorf("Couldn't unpack string value: input was empty")
+	} else if value[0] != stringType {
+		return "", fmt.Errorf("Couldn't unpack string value: wanted type-byte %d, got %d", stringType, value[0])
+	}
+	return string(value[1:]), nil
 }
 
 func packTimeValue(value time.Time) []byte {
@@ -293,6 +307,15 @@ func unpackInt64Value(value []byte) (int64, error) {
 	return out, nil
 }
 
+func packMd5HashValue(value [16]byte) []byte {
+	buf := make([]byte, len(value)+1, len(value)+1)
+	buf[0] = md5HashType
+	for i := 0; i < len(value); i++ {
+		buf[i+1] = value[i]
+	}
+	return buf
+}
+
 func unpackMd5HashValue(value []byte) ([16]byte, error) {
 	out := [16]byte{}
 	if len(value) != 17 {
@@ -304,21 +327,29 @@ func unpackMd5HashValue(value []byte) ([16]byte, error) {
 	return out, nil
 }
 
-func packMd5HashValue(value [16]byte) []byte {
-	buf := make([]byte, len(value)+1, len(value)+1)
-	buf[0] = md5HashType
-	for i := 0; i < len(value); i++ {
-		buf[i+1] = value[i]
-	}
-	return buf
+func packStringTimestampPair(name string, timestamp time.Time) []byte {
+	// We actually store it as (type, nanosecond-timestamp, name) for easier unpacking
+	buf := bytes.NewBuffer(make([]byte, 0, len(name)+9))
+	buf.WriteByte(stringTimestampPairType)
+	binary.Write(buf, binary.BigEndian, timestamp.UnixNano())
+	buf.WriteString(name)
+	return buf.Bytes()
 }
 
-func packNameTimestampPair(name string, timestamp time.Time) []byte {
-	buf := bytes.NewBuffer(make([]byte, 0, len(name)+9))
-	buf.WriteByte(nameTimestampPairType)
-	buf.WriteString(name)
-	binary.Write(buf, binary.BigEndian, timestamp.UnixNano())
-	return buf.Bytes()
+func unpackStringTimestampPair(value []byte) (name string, timestamp time.Time, err error) {
+	// it's packed as (type, nanosecond-timestamp, name)
+	if len(value) < 9 {
+		err = fmt.Errorf("Couldn't unpack string+timestamp value: wanted value of length >= 9, got %d", len(value))
+		return
+	} else if value[0] != stringTimestampPairType {
+		err = fmt.Errorf("Couldn't unpack string+timestamp value: wanted type-byte %d, got %d",
+			stringTimestampPairType, value[0])
+		return
+	}
+	nano := int64(binary.BigEndian.Uint64(value[1:]))
+	timestamp = time.Unix(nano/1000000000, nano%1000000000)
+	name = string(value[9:])
+	return
 }
 
 // Retrieve a container
@@ -433,8 +464,16 @@ func (cs *ContainerStore) GetContainer(partition uint32, account string, contain
 				return nil, false, errors.Wrap(err, "Couldn't unpack ReconcilerSyncPoint")
 			}
 		case metadataType:
-			attrData = attrData
-			// TODO: writeme
+			metaName := string(attrData)
+			metaValue, metaTime, err := unpackStringTimestampPair(value)
+			if err != nil {
+				return nil, false, errors.Wrapf(err, "Couldn't unpack metadatum %s", metaName)
+			}
+			if len(metaValue) > 0 {
+				// Empty values are tombstones; we don't show those to callers
+				cinfo.Metadata = append(cinfo.Metadata, MetadataItem{
+					Name: metaName, Value: metaValue, Timestamp: metaTime})
+			}
 		default:
 			return nil, false, fmt.Errorf("Unknown container attribute type %v", attrName)
 		}
@@ -459,6 +498,7 @@ func (cs *ContainerStore) CreateContainer(partition uint32, req CreateContainerR
 	}
 	if cexists && cinfo.PutTimestamp.After(cinfo.DeleteTimestamp) {
 		// deleted container; we can resurrect it
+		// TODO: resurrect it
 	} else if !cexists {
 		// no records for this container; we can create it
 		batch := gorocksdb.NewWriteBatch()
@@ -499,7 +539,7 @@ func (cs *ContainerStore) CreateContainer(partition uint32, req CreateContainerR
 
 		for _, metaItem := range req.Metadata {
 			// We deliberately ignore item.Timestamp in favor of req.Timestamp.
-			batch.PutCF(cs.metaCF, packMetadataKey(prefix, metaItem.Name), packNameTimestampPair(metaItem.Value, req.Timestamp))
+			batch.PutCF(cs.metaCF, packMetadataKey(prefix, metaItem.Name), packStringTimestampPair(metaItem.Value, req.Timestamp))
 		}
 
 		err = cs.db.Write(gorocksdb.NewDefaultWriteOptions(), batch)
@@ -510,3 +550,36 @@ func (cs *ContainerStore) CreateContainer(partition uint32, req CreateContainerR
 
 	return nil
 }
+
+func (cs *ContainerStore) UpdateContainer(partition uint32, req UpdateContainerRequest) error {
+	containerHash := cs.hasher.HashContainerPath(req.Account, req.Container)
+	prefix := containerAttributeKeyPrefix(partition, containerHash)
+
+	// We don't need much, but we do want to ensure that the container doesn't vanish out from under us while we're
+	// updating the metadata. A shared lock is sufficient.
+	unlock := cs.lockManager.lockContainerForRead(containerHash)
+	defer unlock()
+
+	_, cexists, err := cs.GetContainer(partition, req.Account, req.Container)
+	if err != nil {
+		return err
+	}
+	if !cexists {
+		return &ContainerNotFoundError{Account: req.Account, Container: req.Container}
+	}
+
+	// We don't look at existing metadata at all because we may receive updates out of order. Instead, we just take each
+	// new metadatum and Merge() it into the database, where our merge operator will ensure that the last write wins.
+	batch := gorocksdb.NewWriteBatch()
+	for _, metaItem := range req.Metadata {
+		batch.MergeCF(cs.metaCF, packMetadataKey(prefix, metaItem.Name), packStringTimestampPair(metaItem.Value, req.Timestamp))
+	}
+	return cs.db.Write(gorocksdb.NewDefaultWriteOptions(), batch)
+}
+
+// type UpdateContainerRequest struct {
+// 	Account   string
+// 	Container string
+// 	Timestamp time.Time
+// 	Metadata  []MetadataItem
+// }

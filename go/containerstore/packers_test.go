@@ -21,6 +21,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+// Tests for the various packX/unpackX functions
+
+// [un]packAttributeKey
 func TestPackAttributeKeyRoundTrip(t *testing.T) {
 	assert := assert.New(t)
 
@@ -60,6 +63,7 @@ func TestUnpackAttributeKeyBadVersion(t *testing.T) {
 	assert.NotNil(err)
 }
 
+// [un]packUint64Value
 func TestUnpackUint64RoundTrip(t *testing.T) {
 	assert := assert.New(t)
 
@@ -85,6 +89,7 @@ func TestUnpackUint64WrongType(t *testing.T) {
 	assert.NotNil(err)
 }
 
+// [un]packInt64Value
 func TestUnpackInt64RoundTrip(t *testing.T) {
 	assert := assert.New(t)
 
@@ -110,6 +115,7 @@ func TestUnpackInt64WrongType(t *testing.T) {
 	assert.NotNil(err)
 }
 
+// [un]packTimeValue
 func TestUnpackTimeValueRoundTrip(t *testing.T) {
 	assert := assert.New(t)
 
@@ -133,5 +139,102 @@ func TestUnpackTimeValueWrongType(t *testing.T) {
 	packed := packTimeValue(time.Now())
 	packed[0]++ // change the type indicator
 	_, err := unpackTimeValue([]byte{})
+	assert.NotNil(err)
+}
+
+// [un]packStringValue
+func TestUnpackStringValueRoundTrip(t *testing.T) {
+	assert := assert.New(t)
+
+	value := "skyman-Corylus"
+	gotValue, err := unpackStringValue(packStringValue(value))
+	assert.Nil(err)
+	assert.Equal(value, gotValue)
+}
+
+func TestUnpackStringValueEmptyString(t *testing.T) {
+	assert := assert.New(t)
+	gotValue, err := unpackStringValue(packStringValue(""))
+	assert.Nil(err)
+	assert.Equal("", gotValue)
+}
+
+func TestUnpackStringValueShortInput(t *testing.T) {
+	assert := assert.New(t)
+
+	_, err := unpackStringValue([]byte{})
+	assert.NotNil(err)
+}
+
+func TestUnpackStringValueWrongType(t *testing.T) {
+	assert := assert.New(t)
+
+	packed := packStringValue("ophiophilism-dendrophil")
+	packed[0]++
+	_, err := unpackStringValue(packed)
+	assert.NotNil(err)
+}
+
+// [un]packMd5HashValue
+func TestUnpackMd5HashValueRoundTrip(t *testing.T) {
+	assert := assert.New(t)
+
+	value := [16]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	gotValue, err := unpackMd5HashValue(packMd5HashValue(value))
+	assert.Nil(err)
+	assert.Equal(value, gotValue)
+}
+
+func TestUnpackMd5HashValueShortInput(t *testing.T) {
+	assert := assert.New(t)
+
+	_, err := unpackMd5HashValue([]byte{})
+	assert.NotNil(err)
+}
+
+func TestUnpackMd5HashValueWrongType(t *testing.T) {
+	assert := assert.New(t)
+
+	value := [16]byte{0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}
+	packed := packMd5HashValue(value)
+	packed[0]++
+	_, err := unpackMd5HashValue(packed)
+	assert.NotNil(err)
+}
+
+func TestUnpackStringTimestampPair(t *testing.T) {
+	assert := assert.New(t)
+	strValue := "grysbok-trimembral"
+	timeValue := time.Now()
+
+	gotStr, gotTime, err := unpackStringTimestampPair(packStringTimestampPair(strValue, timeValue))
+	assert.Nil(err)
+	assert.Equal(strValue, gotStr)
+	assert.True(timeValue.Equal(gotTime))
+}
+
+func TestUnpackStringTimestampPairEmptyString(t *testing.T) {
+	assert := assert.New(t)
+	strValue := ""
+	timeValue := time.Now()
+
+	gotStr, gotTime, err := unpackStringTimestampPair(packStringTimestampPair(strValue, timeValue))
+	assert.Nil(err)
+	assert.Equal(strValue, gotStr)
+	assert.True(timeValue.Equal(gotTime))
+}
+
+func TestUnpackStringTimestampPairShortInput(t *testing.T) {
+	assert := assert.New(t)
+
+	_, _, err := unpackStringTimestampPair([]byte{})
+	assert.NotNil(err)
+}
+
+func TestUnpackStringTimestampPairWrongType(t *testing.T) {
+	assert := assert.New(t)
+	packed := packStringTimestampPair("alemonger-Anseis", time.Now())
+	packed[0]++
+	_, _, err := unpackStringTimestampPair(packed)
 	assert.NotNil(err)
 }

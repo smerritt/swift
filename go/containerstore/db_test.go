@@ -52,7 +52,6 @@ func makeTestDb() (*ContainerStore, func()) {
 
 func TestContainerExistence(t *testing.T) {
 	assert := assert.New(t)
-
 	cstore, cleanup := makeTestDb()
 	defer cleanup()
 
@@ -94,4 +93,64 @@ func TestContainerExistence(t *testing.T) {
 	assert.Equal(int64(-1), cinfo.ContainerSyncPoint1)
 	assert.Equal(int64(-1), cinfo.ContainerSyncPoint2)
 	assert.Equal(int64(-1), cinfo.ReconcilerSyncPoint)
+
+	assert.Equal(2, len(cinfo.Metadata))
+	assert.Equal("Breed", cinfo.Metadata[0].Name)
+	assert.Equal("Holstein", cinfo.Metadata[0].Value)
+	assert.True(now.Equal(cinfo.Metadata[0].Timestamp))
+	assert.Equal("Color", cinfo.Metadata[1].Name)
+	assert.Equal("Black+White", cinfo.Metadata[1].Value)
+	assert.True(now.Equal(cinfo.Metadata[1].Timestamp))
+}
+
+func TestContainerMetadataUpdate(t *testing.T) {
+	assert := assert.New(t)
+	cstore, cleanup := makeTestDb()
+	defer cleanup()
+
+	accountName := "AUTH_Monilia"
+	containerName := "phalanges"
+
+	now := time.Now()
+	meta := make([]MetadataItem, 0)
+	meta = append(meta, MetadataItem{Name: "Calories", Value: "120"})
+	meta = append(meta, MetadataItem{Name: "Flavor", Value: "raspberry"})
+	meta = append(meta, MetadataItem{Name: "Cost", Value: "$1"})
+	err := cstore.CreateContainer(123456, CreateContainerRequest{
+		Account:            accountName,
+		Container:          containerName,
+		Timestamp:          now,
+		StoragePolicyIndex: 12,
+		Metadata:           meta})
+	assert.Nil(err)
+
+	// Update one metadatum, delete another, add a third
+	now = now.Add(time.Second)
+	updates := make([]MetadataItem, 0)
+	updates = append(updates, MetadataItem{Name: "Calories", Value: "130"})
+	updates = append(updates, MetadataItem{Name: "Category", Value: "Cookie"})
+	updates = append(updates, MetadataItem{Name: "Flavor", Value: ""}) // empty value means deletion
+
+	err = cstore.UpdateContainer(123456, UpdateContainerRequest{
+		Account:   accountName,
+		Container: containerName,
+		Timestamp: now,
+		Metadata:  updates,
+	})
+	assert.Nil(err)
+
+	cinfo, containerExists, err := cstore.GetContainer(123456, accountName, containerName)
+	assert.True(containerExists)
+	assert.Nil(err)
+	assert.Equal(3, len(cinfo.Metadata))
+	assert.Equal(cinfo.Metadata[0].Name, "Calories")
+	assert.Equal(cinfo.Metadata[0].Value, "130")
+	assert.Equal(cinfo.Metadata[1].Name, "Category")
+	assert.Equal(cinfo.Metadata[1].Value, "Cookie")
+	assert.Equal(cinfo.Metadata[2].Name, "Cost")
+	assert.Equal(cinfo.Metadata[2].Value, "$1")
+}
+
+func TestContainerMetadataMultipleUpdates(t *testing.T) {
+	// This tests the partial merge operator
 }
