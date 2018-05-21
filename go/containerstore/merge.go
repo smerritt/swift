@@ -31,28 +31,15 @@ func mergeContainerMetadataValues(left, right []byte) ([]byte, error) {
 	}
 }
 
-func partialMergeContainerAttributes(key, leftOperand, rightOperand []byte) ([]byte, bool) {
-	// both leftOperand and rightOperand are the values passed to Merge() calls
-	_, attrType, _, err := unpackAttributeKey(key)
-	if err != nil {
-		return []byte{}, false
-	}
+type mergeOperatorContainerAttributes struct{}
 
-	switch attrType {
-	case metadataType:
-		newer, err := mergeContainerMetadataValues(leftOperand, rightOperand)
-		if err != nil {
-			return newer, false
-		}
-		return newer, true
-	}
-
-	// If it's a thing we don't know how to merge, then return false and hope that the full merge knows what to do with
-	// it.
-	return []byte{}, false
+func (m *mergeOperatorContainerAttributes) Name() string {
+	// Don't change this or RocksDB will complain. It has no meaning, but the string is stored in the DB at creation,
+	// and if it doesn't match on subsequent OpenDb[ColumnFamilies] calls, then RocksDB won't open the database.
+	return "attrmerge"
 }
 
-func fullMergeContainerAttributes(key []byte, existingValue []byte, mergeOperands [][]byte) ([]byte, bool) {
+func (m *mergeOperatorContainerAttributes) FullMerge(key, existingValue []byte, mergeOperands [][]byte) ([]byte, bool) {
 	_, attrType, _, err := unpackAttributeKey(key)
 	if err != nil {
 		// TODO: log an error
@@ -86,18 +73,23 @@ func fullMergeContainerAttributes(key []byte, existingValue []byte, mergeOperand
 	return []byte{}, false
 }
 
-type mergeOperatorContainerAttributes struct{}
-
-func (m *mergeOperatorContainerAttributes) Name() string {
-	// Don't change this or RocksDB will complain. It has no meaning, but the string is stored in the DB at creation,
-	// and if it doesn't match on subsequent OpenDb[ColumnFamilies] calls, then RocksDB won't open the database.
-	return "attrmerge"
-}
-
-func (m *mergeOperatorContainerAttributes) FullMerge(key, existingValue []byte, operands [][]byte) ([]byte, bool) {
-	return fullMergeContainerAttributes(key, existingValue, operands)
-}
-
 func (m *mergeOperatorContainerAttributes) PartialMerge(key, leftOperand, rightOperand []byte) ([]byte, bool) {
-	return partialMergeContainerAttributes(key, leftOperand, rightOperand)
+	// both leftOperand and rightOperand are the values passed to Merge() calls
+	_, attrType, _, err := unpackAttributeKey(key)
+	if err != nil {
+		return []byte{}, false
+	}
+
+	switch attrType {
+	case metadataType:
+		newer, err := mergeContainerMetadataValues(leftOperand, rightOperand)
+		if err != nil {
+			return newer, false
+		}
+		return newer, true
+	}
+
+	// If it's a thing we don't know how to merge, then return false and hope that the full merge knows what to do with
+	// it.
+	return []byte{}, false
 }
