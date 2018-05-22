@@ -20,6 +20,15 @@ type ContainerNotFoundError struct {
 	Container string
 }
 
-func (cnfe *ContainerNotFoundError) Error() string {
-	return fmt.Sprintf("Container %s/%s not found", cnfe.Account, cnfe.Container)
+func (e *ContainerNotFoundError) Error() string {
+	return fmt.Sprintf("Container %s/%s not found", e.Account, e.Container)
+}
+
+type ContainerExistsError struct {
+	Account   string
+	Container string
+}
+
+func (e *ContainerExistsError) Error() string {
+	return fmt.Sprintf("Container %s/%s exists", e.Account, e.Container)
 }

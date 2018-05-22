@@ -56,16 +56,18 @@ func TestContainerExistence(t *testing.T) {
 	defer cleanup()
 
 	// It's not there
-	_, containerExists, err := cstore.GetContainer(123456, "LDAP_cowsays", "moo")
-	assert.False(containerExists)
-	assert.Nil(err)
+	_, err := cstore.GetContainer(123456, "LDAP_cowsays", "moo")
+	assert.NotNil(err)
+	_, ok := err.(*ContainerNotFoundError)
+	assert.True(ok)
 
 	// so we make it
 	now := time.Now()
 	meta := make([]MetadataItem, 0)
 	meta = append(meta, MetadataItem{Name: "Breed", Value: "Holstein"})
 	meta = append(meta, MetadataItem{Name: "Color", Value: "Black+White"})
-	err = cstore.CreateContainer(123456, CreateContainerRequest{
+	err = cstore.CreateContainer(CreateContainerRequest{
+		Partition:          123456,
 		Account:            "LDAP_cowsays",
 		Container:          "moo",
 		Timestamp:          now,
@@ -73,9 +75,8 @@ func TestContainerExistence(t *testing.T) {
 		Metadata:           meta})
 
 	// Now it's there
-	cinfo, containerExists, err := cstore.GetContainer(123456, "LDAP_cowsays", "moo")
+	cinfo, err := cstore.GetContainer(123456, "LDAP_cowsays", "moo")
 	assert.Nil(err)
-	assert.True(containerExists)
 	assert.Equal("LDAP_cowsays", cinfo.Account)
 	assert.Equal("moo", cinfo.Container)
 	assert.True(now.Equal(cinfo.CreatedAt))
@@ -103,6 +104,42 @@ func TestContainerExistence(t *testing.T) {
 	assert.True(now.Equal(cinfo.Metadata[1].Timestamp))
 }
 
+func TestContainerDeletion(t *testing.T) {
+	assert := assert.New(t)
+	cstore, cleanup := makeTestDb()
+	defer cleanup()
+
+	accountName := "KEY_housewifery"
+	containerName := "cyprine"
+
+	now := time.Now()
+	meta := make([]MetadataItem, 0)
+	err := cstore.CreateContainer(CreateContainerRequest{
+		Partition:          123,
+		Account:            accountName,
+		Container:          containerName,
+		Timestamp:          now,
+		StoragePolicyIndex: 0,
+		Metadata:           meta})
+	assert.Nil(err)
+
+	// delete it
+	now = now.Add(time.Second)
+	err = cstore.DeleteContainer(DeleteContainerRequest{
+		Partition: 123,
+		Account:   accountName,
+		Container: containerName,
+		Timestamp: now,
+	})
+	assert.Nil(err)
+
+	// and it's not there any more
+	_, err = cstore.GetContainer(123, accountName, containerName)
+	assert.NotNil(err)
+	_, ok := err.(*ContainerNotFoundError)
+	assert.True(ok)
+}
+
 func TestContainerMetadataUpdate(t *testing.T) {
 	assert := assert.New(t)
 	cstore, cleanup := makeTestDb()
@@ -116,7 +153,8 @@ func TestContainerMetadataUpdate(t *testing.T) {
 	meta = append(meta, MetadataItem{Name: "Calories", Value: "120"})
 	meta = append(meta, MetadataItem{Name: "Flavor", Value: "raspberry"})
 	meta = append(meta, MetadataItem{Name: "Cost", Value: "$1"})
-	err := cstore.CreateContainer(123456, CreateContainerRequest{
+	err := cstore.CreateContainer(CreateContainerRequest{
+		Partition:          123456,
 		Account:            accountName,
 		Container:          containerName,
 		Timestamp:          now,
@@ -131,7 +169,8 @@ func TestContainerMetadataUpdate(t *testing.T) {
 	updates = append(updates, MetadataItem{Name: "Category", Value: "Cookie"})
 	updates = append(updates, MetadataItem{Name: "Flavor", Value: ""}) // empty value means deletion
 
-	err = cstore.UpdateContainer(123456, UpdateContainerRequest{
+	err = cstore.UpdateContainer(UpdateContainerRequest{
+		Partition: 123456,
 		Account:   accountName,
 		Container: containerName,
 		Timestamp: now,
@@ -139,8 +178,7 @@ func TestContainerMetadataUpdate(t *testing.T) {
 	})
 	assert.Nil(err)
 
-	cinfo, containerExists, err := cstore.GetContainer(123456, accountName, containerName)
-	assert.True(containerExists)
+	cinfo, err := cstore.GetContainer(123456, accountName, containerName)
 	assert.Nil(err)
 	assert.Equal(3, len(cinfo.Metadata))
 	assert.Equal(cinfo.Metadata[0].Name, "Calories")
@@ -162,7 +200,8 @@ func TestContainerMetadataMultipleUpdates(t *testing.T) {
 	now := time.Now()
 	meta := make([]MetadataItem, 0)
 	meta = append(meta, MetadataItem{Name: "SerialNumber", Value: "1"})
-	err := cstore.CreateContainer(12345, CreateContainerRequest{
+	err := cstore.CreateContainer(CreateContainerRequest{
+		Partition:          12345,
 		Account:            accountName,
 		Container:          containerName,
 		Timestamp:          now,
@@ -172,7 +211,8 @@ func TestContainerMetadataMultipleUpdates(t *testing.T) {
 
 	for i := 0; i < 5; i++ {
 		now = now.Add(time.Second)
-		err = cstore.UpdateContainer(12345, UpdateContainerRequest{
+		err = cstore.UpdateContainer(UpdateContainerRequest{
+			Partition: 12345,
 			Account:   accountName,
 			Container: containerName,
 			Timestamp: now,
@@ -181,10 +221,103 @@ func TestContainerMetadataMultipleUpdates(t *testing.T) {
 		})
 		assert.Nil(err)
 	}
-	cinfo, containerExists, err := cstore.GetContainer(12345, accountName, containerName)
-	assert.True(containerExists)
+	cinfo, err := cstore.GetContainer(12345, accountName, containerName)
 	assert.Nil(err)
 	assert.Equal(1, len(cinfo.Metadata))
 	assert.Equal(cinfo.Metadata[0].Name, "SerialNumber")
 	assert.Equal(cinfo.Metadata[0].Value, "400")
+}
+
+func TestContainerResurrection(t *testing.T) {
+	assert := assert.New(t)
+
+	cstore, cleanup := makeTestDb()
+	defer cleanup()
+
+	accountName := "valuate"
+	containerName := "stypticity"
+
+	// make a container
+	now := time.Now()
+	meta := make([]MetadataItem, 0)
+	meta = append(meta, MetadataItem{Name: "OldMeta", Value: "dontcare"})
+	err := cstore.CreateContainer(CreateContainerRequest{
+		Partition:          12345,
+		Account:            accountName,
+		Container:          containerName,
+		Timestamp:          now,
+		StoragePolicyIndex: 8,
+		Metadata:           meta})
+	assert.Nil(err)
+
+	// delete it
+	now = now.Add(time.Second)
+	err = cstore.DeleteContainer(DeleteContainerRequest{
+		Partition: 12345,
+		Account:   accountName,
+		Container: containerName,
+		Timestamp: now,
+	})
+	assert.Nil(err)
+
+	// and resurrect it
+	now = now.Add(time.Second)
+	meta = make([]MetadataItem, 0)
+	meta = append(meta, MetadataItem{Name: "NewMeta", Value: "goodstuff"})
+	err = cstore.CreateContainer(CreateContainerRequest{
+		Partition:          12345,
+		Account:            accountName,
+		Container:          containerName,
+		Timestamp:          now,
+		StoragePolicyIndex: 8,
+		Metadata:           meta})
+	assert.Nil(err)
+
+	cinfo, err := cstore.GetContainer(12345, accountName, containerName)
+	assert.Nil(err)
+	assert.Equal(1, len(cinfo.Metadata))
+	assert.Equal(cinfo.Metadata[0].Name, "NewMeta")
+	assert.Equal(cinfo.Metadata[0].Value, "goodstuff")
+}
+
+func TestResurrectContainerInPast(t *testing.T) {
+	assert := assert.New(t)
+	cstore, cleanup := makeTestDb()
+	defer cleanup()
+
+	accountName := "Zygosaccharomyces"
+	containerName := "paranormal"
+
+	// make a container
+	now := time.Now()
+	meta := make([]MetadataItem, 0)
+	err := cstore.CreateContainer(CreateContainerRequest{
+		Partition:          12345,
+		Account:            accountName,
+		Container:          containerName,
+		Timestamp:          now,
+		StoragePolicyIndex: 8,
+		Metadata:           meta})
+	assert.Nil(err)
+
+	// delete it
+	now = now.Add(time.Second)
+	err = cstore.DeleteContainer(DeleteContainerRequest{
+		Partition: 12345,
+		Account:   accountName,
+		Container: containerName,
+		Timestamp: now,
+	})
+	assert.Nil(err)
+
+	// try to resurrect it, but with a timestamp earlier than the deletion
+	now = now.Add(-time.Second * 30)
+	err = cstore.CreateContainer(CreateContainerRequest{
+		Partition:          12345,
+		Account:            accountName,
+		Container:          containerName,
+		Timestamp:          now,
+		StoragePolicyIndex: 8,
+		Metadata:           meta})
+	assert.NotNil(err)
 }

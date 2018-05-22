@@ -108,6 +108,7 @@ const (
 )
 
 type CreateContainerRequest struct {
+	Partition          uint32
 	Account            string
 	Container          string
 	Timestamp          time.Time
@@ -116,10 +117,18 @@ type CreateContainerRequest struct {
 }
 
 type UpdateContainerRequest struct {
+	Partition uint32
 	Account   string
 	Container string
 	Timestamp time.Time
 	Metadata  []MetadataItem
+}
+
+type DeleteContainerRequest struct {
+	Partition uint32
+	Account   string
+	Container string
+	Timestamp time.Time
 }
 
 type ContainerStore struct {
@@ -352,8 +361,26 @@ func unpackStringTimestampPair(value []byte) (name string, timestamp time.Time, 
 	return
 }
 
-// Retrieve a container
-func (cs *ContainerStore) GetContainer(partition uint32, account string, container string) (*ContainerInfo, bool, error) {
+// Retrieve a container's information.
+//
+// If the container is not found, the returned error will be of type *ContainerNotFoundError.
+func (cs *ContainerStore) GetContainer(partition uint32, account string, container string) (*ContainerInfo, error) {
+	info, foundData, err := cs.fetchContainerInfo(partition, account, container)
+	if err != nil {
+		return nil, err
+	} else if !foundData {
+		// no data found -> no such container
+		return nil, &ContainerNotFoundError{Account: account, Container: container}
+	} else if info.DeleteTimestamp.After(info.PutTimestamp) {
+		// it's been deleted, but we still have the data around as a tombstone for replication purposes
+		return nil, &ContainerNotFoundError{Account: account, Container: container}
+	} else {
+		return info, nil
+	}
+}
+
+// Returns (the info, whether we found rows, any errors)
+func (cs *ContainerStore) fetchContainerInfo(partition uint32, account string, container string) (*ContainerInfo, bool, error) {
 	var err error
 	err = nil
 	cinfo := defaultContainerInfo()
@@ -376,8 +403,6 @@ func (cs *ContainerStore) GetContainer(partition uint32, account string, contain
 		keysFound++
 		key := iter.Key().Data()
 		value := iter.Value().Data()
-
-		fmt.Printf("%v -> %v\n", key, value)
 
 		// throw out the table prefix, partition, and container hash
 		_, attrName, attrData, err := unpackAttributeKey(key)
@@ -469,8 +494,13 @@ func (cs *ContainerStore) GetContainer(partition uint32, account string, contain
 			if err != nil {
 				return nil, false, errors.Wrapf(err, "Couldn't unpack metadatum %s", metaName)
 			}
-			if len(metaValue) > 0 {
-				// Empty values are tombstones; we don't show those to callers
+			// This is kind of ugly, but since metadataType > putTimestampType here, we assume that cinfo.PutTimestamp
+			// has been filled in by the time we find the metadata items.
+			//
+			// Empty values are tombstones; we don't show those to callers.
+			//
+			// Old values are from a previous incarnation of the container; we don't show those to callers either.
+			if len(metaValue) > 0 && !metaTime.Before(cinfo.PutTimestamp) {
 				cinfo.Metadata = append(cinfo.Metadata, MetadataItem{
 					Name: metaName, Value: metaValue, Timestamp: metaTime})
 			}
@@ -484,23 +514,24 @@ func (cs *ContainerStore) GetContainer(partition uint32, account string, contain
 
 // Create a container with the specified storage policy, metadata, and so on.
 //
-// Returns an error if the container exists.
-func (cs *ContainerStore) CreateContainer(partition uint32, req CreateContainerRequest) error {
+// Returns an error if the container exists or if it has a DeleteTimestamp after the request's Timestamp.
+func (cs *ContainerStore) CreateContainer(req CreateContainerRequest) error {
 	containerHash := cs.hasher.HashContainerPath(req.Account, req.Container)
 
 	// Any time we're possibly changing the storage policy, we should have an exclusive lock on the container.
 	unlock := cs.lockManager.lockContainerForWrite(containerHash)
 	defer unlock()
 
-	cinfo, cexists, err := cs.GetContainer(partition, req.Account, req.Container)
+	cinfo, cexists, err := cs.fetchContainerInfo(req.Partition, req.Account, req.Container)
 	if err != nil {
 		return err
 	}
 	if cexists && cinfo.PutTimestamp.After(cinfo.DeleteTimestamp) {
-		// deleted container; we can resurrect it
-		// TODO: resurrect it
-	} else if !cexists {
-		// no records for this container; we can create it
+		return &ContainerExistsError{Account: req.Account, Container: req.Container}
+	} else if cexists && req.Timestamp.Before(cinfo.DeleteTimestamp) {
+		return &ContainerNotFoundError{Account: req.Account, Container: req.Container}
+	} else {
+		// we can (re)create this container
 		batch := gorocksdb.NewWriteBatch()
 
 		ci := defaultContainerInfo()
@@ -516,56 +547,51 @@ func (cs *ContainerStore) CreateContainer(partition uint32, req CreateContainerR
 		ci.StatusChangedAt = req.Timestamp
 		ci.StoragePolicyIndex = req.StoragePolicyIndex
 
-		prefix := containerAttributeKeyPrefix(partition, containerHash)
+		prefix := containerAttributeKeyPrefix(req.Partition, containerHash)
 
 		// Container attributes: we'll have exactly one of each of these
 		batch.PutCF(cs.metaCF, packAttributeKey(prefix, accountType), packStringValue(ci.Account))
 		batch.PutCF(cs.metaCF, packAttributeKey(prefix, containerType), packStringValue(ci.Container))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, createdAtType), packTimeValue(ci.CreatedAt))
 		batch.PutCF(cs.metaCF, packAttributeKey(prefix, putTimestampType), packTimeValue(ci.CreatedAt))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, deleteTimestampType), packTimeValue(ci.DeleteTimestamp))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, reportedPutTimestampType), packTimeValue(ci.ReportedPutTimestamp))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, reportedDeleteTimestampType), packTimeValue(ci.ReportedDeleteTimestamp))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, reportedObjectCountType), packUint64Value(ci.ReportedObjectCount))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, reportedBytesUsedType), packUint64Value(ci.ReportedBytesUsed))
 		batch.PutCF(cs.metaCF, packAttributeKey(prefix, hashType), packMd5HashValue(ci.Hash))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, idType), packStringValue(ci.Id))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, statusType), packStringValue(ci.Status))
+		batch.PutCF(cs.metaCF, packAttributeKey(prefix, statusType), packStringValue(ci.Status)) // TODO: is this used anywhere?
 		batch.PutCF(cs.metaCF, packAttributeKey(prefix, statusChangedAtType), packTimeValue(ci.StatusChangedAt))
 		batch.PutCF(cs.metaCF, packAttributeKey(prefix, storagePolicyIndexType), packInt64Value(ci.StoragePolicyIndex))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, containerSyncPoint1Type), packInt64Value(ci.ContainerSyncPoint1))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, containerSyncPoint2Type), packInt64Value(ci.ContainerSyncPoint2))
-		batch.PutCF(cs.metaCF, packAttributeKey(prefix, reconcilerSyncPointType), packInt64Value(ci.ReconcilerSyncPoint))
+
+		if cexists {
+			// We're resurrecting a deleted container, so keep its id, but reset the various sync points
+			batch.PutCF(cs.metaCF, packAttributeKey(prefix, containerSyncPoint1Type), packInt64Value(-1))
+			batch.PutCF(cs.metaCF, packAttributeKey(prefix, containerSyncPoint2Type), packInt64Value(-1))
+			batch.PutCF(cs.metaCF, packAttributeKey(prefix, reconcilerSyncPointType), packInt64Value(-1))
+		} else {
+			// We're creating a new container; make a new Id for it and set the creation time
+			batch.PutCF(cs.metaCF, packAttributeKey(prefix, idType), packStringValue(ci.Id))
+			batch.PutCF(cs.metaCF, packAttributeKey(prefix, createdAtType), packTimeValue(ci.CreatedAt))
+		}
 
 		for _, metaItem := range req.Metadata {
 			// We deliberately ignore item.Timestamp in favor of req.Timestamp.
+			//
+			// Also, we make no effort to remove old, stale metadata items here. We filter them out in GetContainer()
+			// and clean them up elsewhere.
 			batch.PutCF(cs.metaCF, packMetadataKey(prefix, metaItem.Name), packStringTimestampPair(metaItem.Value, req.Timestamp))
 		}
-
-		err = cs.db.Write(gorocksdb.NewDefaultWriteOptions(), batch)
-		if err != nil {
-			return err
-		}
+		return cs.db.Write(gorocksdb.NewDefaultWriteOptions(), batch)
 	}
-
-	return nil
 }
 
-func (cs *ContainerStore) UpdateContainer(partition uint32, req UpdateContainerRequest) error {
+func (cs *ContainerStore) UpdateContainer(req UpdateContainerRequest) error {
 	containerHash := cs.hasher.HashContainerPath(req.Account, req.Container)
-	prefix := containerAttributeKeyPrefix(partition, containerHash)
+	prefix := containerAttributeKeyPrefix(req.Partition, containerHash)
 
 	// We don't need much, but we do want to ensure that the container doesn't vanish out from under us while we're
 	// updating the metadata. A shared lock is sufficient.
 	unlock := cs.lockManager.lockContainerForRead(containerHash)
 	defer unlock()
 
-	_, cexists, err := cs.GetContainer(partition, req.Account, req.Container)
+	_, err := cs.GetContainer(req.Partition, req.Account, req.Container)
 	if err != nil {
 		return err
-	}
-	if !cexists {
-		return &ContainerNotFoundError{Account: req.Account, Container: req.Container}
 	}
 
 	// We don't look at existing metadata at all because we may receive updates out of order. Instead, we just take each
@@ -577,9 +603,22 @@ func (cs *ContainerStore) UpdateContainer(partition uint32, req UpdateContainerR
 	return cs.db.Write(gorocksdb.NewDefaultWriteOptions(), batch)
 }
 
-// type UpdateContainerRequest struct {
-// 	Account   string
-// 	Container string
-// 	Timestamp time.Time
-// 	Metadata  []MetadataItem
-// }
+func (cs *ContainerStore) DeleteContainer(req DeleteContainerRequest) error {
+	containerHash := cs.hasher.HashContainerPath(req.Account, req.Container)
+	prefix := containerAttributeKeyPrefix(req.Partition, containerHash)
+
+	// People writing object rows will have read locks, so we need a write lock to ensure that nobody's writing object
+	// rows while we are deleting the container.
+	unlock := cs.lockManager.lockContainerForWrite(containerHash)
+	defer unlock()
+
+	_, err := cs.GetContainer(req.Partition, req.Account, req.Container)
+	if err != nil {
+		return err
+	}
+
+	// Deletion is easy; just update DeleteTimestamp. Purging the old data happens elsewhere.
+	batch := gorocksdb.NewWriteBatch()
+	batch.PutCF(cs.metaCF, packAttributeKey(prefix, deleteTimestampType), packTimeValue(req.Timestamp))
+	return cs.db.Write(gorocksdb.NewDefaultWriteOptions(), batch)
+}
